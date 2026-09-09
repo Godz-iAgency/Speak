@@ -117,6 +117,16 @@ export function CopyIcon({ size = 20, className }: IconProps) {
   );
 }
 
+export function SplitIcon({ size = 20, className }: IconProps) {
+  return (
+    <svg {...base(size, className)}>
+      <path d="M12 3v18" strokeDasharray="3 3" />
+      <path d="M6.5 7.5 12 12l5.5-4.5" />
+      <path d="M6.5 16.5 12 12l5.5 4.5" />
+    </svg>
+  );
+}
+
 export function ArrowLeftIcon({ size = 20, className }: IconProps) {
   return (
     <svg {...base(size, className)}>

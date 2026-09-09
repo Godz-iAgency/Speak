@@ -51,6 +51,21 @@ function nextOpId(): string {
   return `op${opCounter}`;
 }
 
+// Unique filenames stop jobs clobbering each other's files, but the worker itself
+// can still only run one exec at a time — overlapping jobs (a hot reload landing
+// mid-remux, or an export fired while one is still finishing) surface as
+// "ErrnoError: FS error". Every job goes through this queue so they serialise.
+let jobQueue: Promise<unknown> = Promise.resolve();
+function runExclusive<T>(job: () => Promise<T>): Promise<T> {
+  const result = jobQueue.then(job, job);
+  // Swallow failures on the chain itself so one bad job can't poison the queue.
+  jobQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 /**
  * Chrome's MediaRecorder writes webm output with an "unknown" duration in the
  * container header (it doesn't know the final length while streaming), which makes
@@ -58,19 +73,21 @@ function nextOpId(): string {
  * through ffmpeg (stream copy, no re-encode) forces a full read and produces a file
  * with a correct duration header.
  */
-export async function remuxForDuration(blob: Blob): Promise<Blob> {
-  const ffmpeg = await getFFmpeg();
-  const id = nextOpId();
-  const inputName = `${id}-remux-in.webm`;
-  const outputName = `${id}-remux-out.webm`;
-  try {
-    await ffmpeg.writeFile(inputName, new Uint8Array(await blob.arrayBuffer()));
-    await ffmpeg.exec(['-y', '-i', inputName, '-c', 'copy', outputName]);
-    const data = await ffmpeg.readFile(outputName);
-    return new Blob([new Uint8Array(data as Uint8Array)], { type: 'video/webm' });
-  } finally {
-    await removeFiles(ffmpeg, [inputName, outputName]);
-  }
+export function remuxForDuration(blob: Blob): Promise<Blob> {
+  return runExclusive(async () => {
+    const ffmpeg = await getFFmpeg();
+    const id = nextOpId();
+    const inputName = `${id}-remux-in.webm`;
+    const outputName = `${id}-remux-out.webm`;
+    try {
+      await ffmpeg.writeFile(inputName, new Uint8Array(await blob.arrayBuffer()));
+      await ffmpeg.exec(['-y', '-i', inputName, '-c', 'copy', outputName]);
+      const data = await ffmpeg.readFile(outputName);
+      return new Blob([new Uint8Array(data as Uint8Array)], { type: 'video/webm' });
+    } finally {
+      await removeFiles(ffmpeg, [inputName, outputName]);
+    }
+  });
 }
 
 async function removeFiles(ffmpeg: FFmpeg, names: string[]) {
@@ -81,11 +98,20 @@ async function removeFiles(ffmpeg: FFmpeg, names: string[]) {
 }
 
 /**
- * Cuts `blob` down to the union of `keepSegments` (already sorted, non-overlapping,
- * in seconds) and returns an mp4 Blob. Each segment is trimmed+re-encoded then
- * concatenated, since input is inter-frame vp9/webm and cut points are arbitrary.
+ * Cuts `blob` down to `keepSegments` and returns an mp4 Blob. Segments are
+ * trimmed+re-encoded individually then concatenated **in array order**, so
+ * reordering the caller's segments reorders the finished video. Re-encoding is
+ * required because the input is inter-frame vp9/webm and cut points are arbitrary.
  */
-export async function trimAndExport(
+export function trimAndExport(
+  blob: Blob,
+  keepSegments: Segment[],
+  onProgress?: (ratio: number) => void,
+): Promise<Blob> {
+  return runExclusive(() => trimAndExportInner(blob, keepSegments, onProgress));
+}
+
+async function trimAndExportInner(
   blob: Blob,
   keepSegments: Segment[],
   onProgress?: (ratio: number) => void,

@@ -34,8 +34,7 @@ export function LivePreview({
 }: LivePreviewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [rect, setRect] = useState({ width: 0, height: 0 });
-  const dragging = useRef(false);
-  const movedSinceDown = useRef(false);
+  const [dragging, setDragging] = useState(false);
   const [sizePickerOpen, setSizePickerOpen] = useState(false);
 
   // The recorder creates a fresh canvas per session — mount it directly so the
@@ -87,39 +86,65 @@ export function LivePreview({
     };
   }, [handleStyle, rect.height]);
 
-  const updateFromPointer = (clientX: number, clientY: number) => {
+  // Kept in a ref so the window-level drag listeners below always read current
+  // values without needing to be torn down and re-bound on every render.
+  const latest = useRef({ camSize, onCamPosChange });
+  useEffect(() => {
+    latest.current = { camSize, onCamPosChange };
+  });
+
+  // Offset between the pointer and the bubble's centre at grab time. Without it
+  // the bubble snaps its centre under the cursor on mousedown, which reads as a
+  // jump rather than picking the bubble up.
+  const grabOffset = useRef({ x: 0, y: 0 });
+
+  const moveBubbleTo = (clientX: number, clientY: number) => {
     const container = containerRef.current;
     if (!container) return;
     const box = container.getBoundingClientRect();
     if (box.width === 0 || box.height === 0) return;
+    const { camSize: size, onCamPosChange: onChange } = latest.current;
     const minDim = Math.min(box.width, box.height);
-    const radius = (CAM_SIZE_FRACTIONS[camSize] * minDim) / 2;
-    const radiusRatioX = radius / box.width;
-    const radiusRatioY = radius / box.height;
-    const relX = (clientX - box.left) / box.width;
-    const relY = (clientY - box.top) / box.height;
-    onCamPosChange({
-      xRatio: Math.min(Math.max(relX, radiusRatioX), 1 - radiusRatioX),
-      yRatio: Math.min(Math.max(relY, radiusRatioY), 1 - radiusRatioY),
+    const radius = (CAM_SIZE_FRACTIONS[size] * minDim) / 2;
+    const rx = radius / box.width;
+    const ry = radius / box.height;
+    const cx = clientX - grabOffset.current.x - box.left;
+    const cy = clientY - grabOffset.current.y - box.top;
+    onChange({
+      xRatio: Math.min(Math.max(cx / box.width, rx), 1 - rx),
+      yRatio: Math.min(Math.max(cy / box.height, ry), 1 - ry),
     });
   };
 
+  // Tracking lives on the window, not the handle: the handle moves out from
+  // under the pointer as it follows, and binding to it makes fast drags stall.
+  useEffect(() => {
+    if (!dragging) return;
+    const onMove = (e: PointerEvent) => {
+      e.preventDefault();
+      moveBubbleTo(e.clientX, e.clientY);
+    };
+    const onUp = () => setDragging(false);
+    window.addEventListener('pointermove', onMove, { passive: false });
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragging]);
+
   const handlePointerDown = (e: React.PointerEvent) => {
-    dragging.current = true;
-    movedSinceDown.current = false;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!dragging.current) return;
-    movedSinceDown.current = true;
+    const container = containerRef.current;
+    if (!container || !handleStyle) return;
+    const box = container.getBoundingClientRect();
+    const centreX = box.left + handleStyle.left + handleStyle.width / 2;
+    const centreY = box.top + handleStyle.top + handleStyle.height / 2;
+    grabOffset.current = { x: e.clientX - centreX, y: e.clientY - centreY };
     setSizePickerOpen(false);
-    updateFromPointer(e.clientX, e.clientY);
-  };
-
-  const handlePointerUp = (e: React.PointerEvent) => {
-    dragging.current = false;
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    setDragging(true);
   };
 
   const handleDoubleClick = (e: React.MouseEvent) => {
@@ -136,11 +161,9 @@ export function LivePreview({
     <div className="live-preview-frame" ref={containerRef} onClick={() => setSizePickerOpen(false)}>
       {webcamEnabled && handleStyle && countdown === null && (
         <div
-          className="live-preview-cam-handle"
+          className={`live-preview-cam-handle ${dragging ? 'live-preview-cam-handle-dragging' : ''}`}
           style={handleStyle}
           onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
           onDoubleClick={handleDoubleClick}
           title="Drag to move, double-click to resize"
         />

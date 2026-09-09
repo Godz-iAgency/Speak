@@ -1,14 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Timeline } from './Timeline';
-import { trimAndExport, remuxForDuration, type Segment } from '../lib/ffmpeg';
+import { Timeline, type Clip } from './Timeline';
+import { trimAndExport, remuxForDuration } from '../lib/ffmpeg';
 import { uploadRecording } from '../lib/upload';
 import { firebaseConfigured } from '../lib/firebase';
-import { CheckIcon, CopyIcon, DownloadIcon, LinkIcon, PauseIcon, PlayIcon, SparkIcon, TrashIcon } from './icons';
+import {
+  CheckIcon,
+  CopyIcon,
+  DownloadIcon,
+  LinkIcon,
+  PauseIcon,
+  PlayIcon,
+  SparkIcon,
+  SplitIcon,
+  TrashIcon,
+} from './icons';
 
 interface EditorProps {
   blob: Blob;
   onDiscard: () => void;
 }
+
+/** Shortest piece worth keeping when splitting, in seconds. */
+const MIN_CLIP = 0.15;
 
 function formatTime(s: number) {
   if (!Number.isFinite(s)) return '0:00';
@@ -17,23 +30,31 @@ function formatTime(s: number) {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
-function mergeKeepSegments(trimStart: number, trimEnd: number, cuts: Segment[]): Segment[] {
-  const sortedCuts = [...cuts].sort((a, b) => a.start - b.start);
-  const kept: Segment[] = [];
-  let cursor = trimStart;
-  for (const cut of sortedCuts) {
-    const cs = Math.max(cut.start, trimStart);
-    const ce = Math.min(cut.end, trimEnd);
-    if (ce <= cursor) continue;
-    if (cs > cursor) {
-      kept.push({ start: cursor, end: Math.min(cs, trimEnd) });
+function clipLength(c: Clip) {
+  return Math.max(0, c.end - c.start);
+}
+
+/** Output time (after cuts/reordering) -> which clip, and where in the source. */
+function outputToSource(clips: Clip[], t: number) {
+  let acc = 0;
+  for (let i = 0; i < clips.length; i++) {
+    const len = clipLength(clips[i]);
+    if (t < acc + len || i === clips.length - 1) {
+      const within = Math.max(0, Math.min(t - acc, len));
+      return { index: i, sourceTime: clips[i].start + within };
     }
-    cursor = Math.max(cursor, ce);
+    acc += len;
   }
-  if (cursor < trimEnd) {
-    kept.push({ start: cursor, end: trimEnd });
-  }
-  return kept.filter((s) => s.end - s.start > 0.05);
+  return null;
+}
+
+/** The inverse: a position inside clip `index` -> its place on the output timeline. */
+function sourceToOutput(clips: Clip[], index: number, sourceTime: number) {
+  let acc = 0;
+  for (let i = 0; i < index && i < clips.length; i++) acc += clipLength(clips[i]);
+  const clip = clips[index];
+  if (!clip) return acc;
+  return acc + Math.max(0, Math.min(sourceTime - clip.start, clipLength(clip)));
 }
 
 export function Editor({ blob, onDiscard }: EditorProps) {
@@ -41,12 +62,15 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const [workingBlob, setWorkingBlob] = useState<Blob | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [prepError, setPrepError] = useState<string | null>(null);
-  const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const [trimStart, setTrimStart] = useState(0);
-  const [trimEnd, setTrimEnd] = useState(0);
-  const [cuts, setCuts] = useState<Segment[]>([]);
+  /** Real aspect ratio of the recording, used to size the stage to fill the screen. */
+  const [aspect, setAspect] = useState(16 / 9);
+  const [clips, setClips] = useState<Clip[]>([]);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  /** Which clip playback is currently inside; playback walks clips in order. */
+  const playIndexRef = useRef(0);
+  const clipSeq = useRef(0);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportBlob, setExportBlob] = useState<Blob | null>(null);
@@ -96,30 +120,46 @@ export function Editor({ blob, onDiscard }: EditorProps) {
 
   const handleLoadedMetadata = () => {
     const v = videoRef.current;
-    if (!v) return;
-    setDuration(v.duration);
-    setTrimEnd(v.duration);
+    if (!v || !Number.isFinite(v.duration)) return;
+    if (v.videoWidth > 0 && v.videoHeight > 0) setAspect(v.videoWidth / v.videoHeight);
+    setClips([{ id: `c${clipSeq.current++}`, start: 0, end: v.duration }]);
   };
 
-  // Stop at the trim point and jump over cut sections so playback previews the
-  // finished cut.
+  const totalDuration = useMemo(() => clips.reduce((acc, c) => acc + clipLength(c), 0), [clips]);
+
+  // Playback walks the clips in their current order, jumping the source video to
+  // the next clip's start whenever it runs off the end of the current one. That
+  // is what makes cuts close up and reordered pieces play back in their new order.
   const advancePlayhead = (v: HTMLVideoElement) => {
-    if (v.currentTime >= trimEnd) {
-      v.pause();
-      setIsPlaying(false);
-      setCurrentTime(trimEnd);
+    const idx = playIndexRef.current;
+    const clip = clips[idx];
+    if (!clip) return;
+
+    if (v.currentTime >= clip.end - 0.03) {
+      const next = idx + 1;
+      if (next >= clips.length) {
+        v.pause();
+        setIsPlaying(false);
+        setCurrentTime(totalDuration);
+        return;
+      }
+      playIndexRef.current = next;
+      v.currentTime = clips[next].start;
+      setCurrentTime(sourceToOutput(clips, next, clips[next].start));
       return;
     }
-    const insideCut = cuts.find((c) => v.currentTime >= c.start && v.currentTime < c.end);
-    if (insideCut) {
-      v.currentTime = Math.min(insideCut.end, trimEnd);
+
+    if (v.currentTime < clip.start - 0.03) {
+      v.currentTime = clip.start;
+      return;
     }
-    setCurrentTime(v.currentTime);
+
+    setCurrentTime(sourceToOutput(clips, idx, v.currentTime));
   };
 
-  // rAF gives a smooth playhead and skips cuts within a frame, but it is suspended
-  // in background tabs — `timeupdate` is driven by the media clock and keeps working
-  // there, so it backs the loop up rather than duplicating it.
+  // rAF gives a smooth playhead and catches clip boundaries within a frame, but it
+  // is suspended in background tabs — `timeupdate` is driven by the media clock and
+  // keeps working there, so it backs the loop up rather than duplicating it.
   useEffect(() => {
     if (!isPlaying) return;
     let raf = 0;
@@ -136,43 +176,90 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const handleTimeUpdate = () => {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) {
-      setCurrentTime(v.currentTime);
-      return;
-    }
+    if (v.paused) return;
     advancePlayhead(v);
   };
 
+  /** Seek by OUTPUT time, mapping back onto whichever clip covers it. */
   const seek = (t: number) => {
     const v = videoRef.current;
-    if (!v) return;
-    v.currentTime = Math.min(Math.max(t, trimStart), trimEnd);
-    setCurrentTime(v.currentTime);
+    if (!v || clips.length === 0) return;
+    const clamped = Math.max(0, Math.min(t, totalDuration));
+    const hit = outputToSource(clips, clamped);
+    if (!hit) return;
+    playIndexRef.current = hit.index;
+    v.currentTime = hit.sourceTime;
+    setCurrentTime(clamped);
   };
 
   const togglePlay = () => {
     const v = videoRef.current;
-    if (!v) return;
+    if (!v || clips.length === 0) return;
     if (isPlaying) {
       v.pause();
       setIsPlaying(false);
-    } else {
-      if (v.currentTime < trimStart || v.currentTime >= trimEnd) {
-        v.currentTime = trimStart;
-      }
-      v.play();
-      setIsPlaying(true);
+      return;
     }
+    // Restart from the top if the playhead is parked at the end.
+    if (currentTime >= totalDuration - 0.05) {
+      playIndexRef.current = 0;
+      v.currentTime = clips[0].start;
+      setCurrentTime(0);
+    }
+    v.play();
+    setIsPlaying(true);
   };
 
-  const keepSegments = useMemo(
-    () => mergeKeepSegments(trimStart, trimEnd, cuts),
-    [trimStart, trimEnd, cuts],
-  );
+  const splitAtPlayhead = () => {
+    const hit = outputToSource(clips, currentTime);
+    if (!hit) return;
+    const clip = clips[hit.index];
+    // Refuse splits that would leave a sliver too short to be useful.
+    if (hit.sourceTime - clip.start < MIN_CLIP || clip.end - hit.sourceTime < MIN_CLIP) return;
+    const left: Clip = { id: `c${clipSeq.current++}`, start: clip.start, end: hit.sourceTime };
+    const right: Clip = { id: `c${clipSeq.current++}`, start: hit.sourceTime, end: clip.end };
+    setClips(clips.flatMap((c, i) => (i === hit.index ? [left, right] : [c])));
+    setSelectedClipId(right.id);
+  };
 
-  const finalDuration = useMemo(
-    () => keepSegments.reduce((acc, s) => acc + (s.end - s.start), 0),
-    [keepSegments],
+  const deleteClip = (id: string) => {
+    const next = clips.filter((c) => c.id !== id);
+    setClips(next);
+    if (selectedClipId === id) setSelectedClipId(null);
+    const nextTotal = next.reduce((acc, c) => acc + clipLength(c), 0);
+    // Pull the playhead back inside what's left so it never points past the end.
+    seekWithin(next, Math.min(currentTime, nextTotal));
+  };
+
+  const reorderClips = (from: number, to: number) => {
+    const next = [...clips];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setClips(next);
+    seekWithin(next, currentTime);
+  };
+
+  /** Re-point the video at an output time against a specific clip list. */
+  const seekWithin = (list: Clip[], t: number) => {
+    const v = videoRef.current;
+    if (!v || list.length === 0) {
+      setCurrentTime(0);
+      return;
+    }
+    const total = list.reduce((acc, c) => acc + clipLength(c), 0);
+    const clamped = Math.max(0, Math.min(t, total));
+    const hit = outputToSource(list, clamped);
+    if (!hit) return;
+    playIndexRef.current = hit.index;
+    v.currentTime = hit.sourceTime;
+    setCurrentTime(clamped);
+  };
+
+  // Clips already are the keep-segments, in output order, so export concatenates
+  // them exactly as the timeline shows them.
+  const keepSegments = useMemo(
+    () => clips.filter((c) => clipLength(c) > 0.05).map((c) => ({ start: c.start, end: c.end })),
+    [clips],
   );
 
   const handleExport = async () => {
@@ -201,7 +288,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     setUploadProgress(0);
     setUploadError(null);
     try {
-      const id = await uploadRecording(exportBlob, finalDuration, setUploadProgress);
+      const id = await uploadRecording(exportBlob, totalDuration, setUploadProgress);
       setShareUrl(`${window.location.origin}/v/${id}`);
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : String(err));
@@ -260,7 +347,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
 
   return (
     <div className="editor">
-      <div className="editor-main">
+      <div className="editor-main" style={{ '--ar': aspect } as React.CSSProperties}>
         <div className="editor-stage">
           <video
             ref={videoRef}
@@ -281,24 +368,31 @@ export function Editor({ blob, onDiscard }: EditorProps) {
             {isPlaying ? <PauseIcon size={17} /> : <PlayIcon size={17} />}
           </button>
           <span className="editor-time">
-            {formatTime(currentTime)} <span>/ {formatTime(duration)}</span>
+            {formatTime(currentTime)} <span>/ {formatTime(totalDuration)}</span>
           </span>
+          <button
+            className="btn btn-secondary btn-small"
+            onClick={splitAtPlayhead}
+            disabled={clips.length === 0}
+            title="Cut the video in two at the playhead"
+          >
+            <SplitIcon size={15} />
+            Split
+          </button>
           <span className="editor-final">
-            Final length <strong>{formatTime(finalDuration)}</strong>
+            Final length <strong>{formatTime(totalDuration)}</strong>
           </span>
         </div>
 
         <Timeline
-          duration={duration}
+          clips={clips}
           currentTime={currentTime}
-          trimStart={trimStart}
-          trimEnd={trimEnd}
-          cuts={cuts}
+          totalDuration={totalDuration}
+          selectedId={selectedClipId}
+          onSelect={setSelectedClipId}
           onSeek={seek}
-          onTrimStartChange={setTrimStart}
-          onTrimEndChange={setTrimEnd}
-          onAddCut={(seg) => setCuts((prev) => [...prev, seg])}
-          onRemoveCut={(i) => setCuts((prev) => prev.filter((_, idx) => idx !== i))}
+          onDelete={deleteClip}
+          onReorder={reorderClips}
         />
 
         <div className="editor-actions">

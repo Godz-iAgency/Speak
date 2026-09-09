@@ -1,159 +1,156 @@
-import { useCallback, useRef, useState } from 'react';
-import type { Segment } from '../lib/ffmpeg';
+import { useEffect, useRef, useState } from 'react';
 
-interface TimelineProps {
-  duration: number;
-  currentTime: number;
-  trimStart: number;
-  trimEnd: number;
-  cuts: Segment[];
-  onSeek: (t: number) => void;
-  onTrimStartChange: (t: number) => void;
-  onTrimEndChange: (t: number) => void;
-  onAddCut: (seg: Segment) => void;
-  onRemoveCut: (index: number) => void;
+export interface Clip {
+  id: string;
+  /** Start time in the ORIGINAL recording, in seconds. */
+  start: number;
+  /** End time in the original recording, in seconds. */
+  end: number;
 }
 
-const MIN_CUT_DURATION = 0.3;
+interface TimelineProps {
+  clips: Clip[];
+  /** Playhead position in OUTPUT time (i.e. after cuts and reordering). */
+  currentTime: number;
+  totalDuration: number;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  onSeek: (outputTime: number) => void;
+  onDelete: (id: string) => void;
+  onReorder: (from: number, to: number) => void;
+}
+
+function clipLength(c: Clip) {
+  return Math.max(0, c.end - c.start);
+}
+
+function formatLen(s: number) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return m > 0 ? `${m}:${sec.toString().padStart(2, '0')}` : `${s.toFixed(1)}s`;
+}
+
+const DRAG_THRESHOLD = 5;
 
 export function Timeline({
-  duration,
+  clips,
   currentTime,
-  trimStart,
-  trimEnd,
-  cuts,
+  totalDuration,
+  selectedId,
+  onSelect,
   onSeek,
-  onTrimStartChange,
-  onTrimEndChange,
-  onAddCut,
-  onRemoveCut,
+  onDelete,
+  onReorder,
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
-  const [dragSelect, setDragSelect] = useState<{ start: number; end: number } | null>(null);
-  const draggingHandle = useRef<'start' | 'end' | null>(null);
-  const selecting = useRef(false);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
 
-  const posToTime = useCallback(
-    (clientX: number) => {
+  const press = useRef<{ id: string; index: number; x: number; moved: boolean } | null>(null);
+
+  // Reordering tracks on the window so a fast drag can't outrun the clip element
+  // sliding out from under the pointer.
+  useEffect(() => {
+    if (!draggingId) return;
+
+    const onMove = (e: PointerEvent) => {
+      const p = press.current;
       const track = trackRef.current;
-      if (!track || duration === 0) return 0;
-      const rect = track.getBoundingClientRect();
-      const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
-      return ratio * duration;
-    },
-    [duration],
-  );
+      if (!p || !track) return;
+      if (!p.moved && Math.abs(e.clientX - p.x) < DRAG_THRESHOLD) return;
+      p.moved = true;
 
-  const pct = (t: number) => (duration === 0 ? 0 : (t / duration) * 100);
-
-  const downXRef = useRef(0);
-
-  const handlePointerDownTrack = (e: React.PointerEvent) => {
-    if (draggingHandle.current) return;
-    const t = posToTime(e.clientX);
-    selecting.current = true;
-    downXRef.current = e.clientX;
-    setDragSelect({ start: t, end: t });
-    (e.target as Element).setPointerCapture(e.pointerId);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (draggingHandle.current) {
-      const t = posToTime(e.clientX);
-      if (draggingHandle.current === 'start') {
-        onTrimStartChange(Math.min(t, trimEnd - 0.1));
-      } else {
-        onTrimEndChange(Math.max(t, trimStart + 0.1));
+      // Which clip is the pointer currently over? Reorder as it passes each one,
+      // so the row rearranges live instead of only on drop.
+      const blocks = [...track.querySelectorAll('[data-clip-index]')] as HTMLElement[];
+      for (const block of blocks) {
+        const idx = Number(block.dataset.clipIndex);
+        const r = block.getBoundingClientRect();
+        if (e.clientX >= r.left && e.clientX <= r.right && idx !== p.index) {
+          onReorder(p.index, idx);
+          p.index = idx;
+          break;
+        }
       }
-      return;
-    }
-    if (selecting.current && dragSelect) {
-      const t = posToTime(e.clientX);
-      setDragSelect({ start: dragSelect.start, end: t });
-    }
+    };
+
+    const onUp = (e: PointerEvent) => {
+      const p = press.current;
+      const track = trackRef.current;
+      // A press that never moved is a click: select the clip and scrub to where
+      // it was clicked.
+      if (p && !p.moved && track && totalDuration > 0) {
+        onSelect(p.id);
+        const r = track.getBoundingClientRect();
+        const ratio = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+        onSeek(ratio * totalDuration);
+      }
+      press.current = null;
+      setDraggingId(null);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [draggingId, onReorder, onSelect, onSeek, totalDuration]);
+
+  const startPress = (e: React.PointerEvent, clip: Clip, index: number) => {
+    press.current = { id: clip.id, index, x: e.clientX, moved: false };
+    setDraggingId(clip.id);
   };
 
-  const handlePointerUp = (e: React.PointerEvent) => {
-    if (draggingHandle.current) {
-      draggingHandle.current = null;
-      return;
-    }
-    if (selecting.current && dragSelect) {
-      selecting.current = false;
-      const start = Math.min(dragSelect.start, dragSelect.end);
-      const end = Math.max(dragSelect.start, dragSelect.end);
-      const movedPx = Math.abs(e.clientX - downXRef.current);
-      if (movedPx < 4) {
-        onSeek(posToTime(e.clientX));
-      } else if (end - start >= MIN_CUT_DURATION) {
-        onAddCut({ start, end });
-      }
-      setDragSelect(null);
-    }
-  };
+  if (clips.length === 0) {
+    return (
+      <div className="tl">
+        <div className="tl-empty">Everything's been cut. Undo a delete or record again.</div>
+      </div>
+    );
+  }
+
+  const playheadPct = totalDuration > 0 ? (currentTime / totalDuration) * 100 : 0;
 
   return (
-    <div className="timeline">
-      <div
-        className="timeline-track"
-        ref={trackRef}
-        onPointerDown={handlePointerDownTrack}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-      >
-        <div className="timeline-dim-left" style={{ width: `${pct(trimStart)}%` }} />
-        <div className="timeline-dim-right" style={{ left: `${pct(trimEnd)}%`, right: 0 }} />
-
-        {cuts.map((c, i) => (
+    <div className="tl">
+      <div className="tl-track" ref={trackRef}>
+        {clips.map((clip, i) => (
           <div
-            key={i}
-            className="timeline-cut"
-            style={{ left: `${pct(c.start)}%`, width: `${pct(c.end - c.start)}%` }}
+            key={clip.id}
+            data-clip-index={i}
+            className={[
+              'tl-clip',
+              selectedId === clip.id ? 'tl-clip-selected' : '',
+              draggingId === clip.id ? 'tl-clip-dragging' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+            style={{ flexGrow: clipLength(clip) }}
+            onPointerDown={(e) => startPress(e, clip, i)}
+            title="Drag to reorder, click to select"
           >
+            <span className="tl-clip-len">{formatLen(clipLength(clip))}</span>
             <button
-              className="timeline-cut-remove"
+              className="tl-clip-del"
               onPointerDown={(e) => e.stopPropagation()}
-              onClick={() => onRemoveCut(i)}
-              title="Remove this cut"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(clip.id);
+              }}
+              title="Delete this piece"
+              aria-label="Delete this piece"
             >
               ×
             </button>
           </div>
         ))}
-
-        {dragSelect && (
-          <div
-            className="timeline-selecting"
-            style={{
-              left: `${pct(Math.min(dragSelect.start, dragSelect.end))}%`,
-              width: `${pct(Math.abs(dragSelect.end - dragSelect.start))}%`,
-            }}
-          />
-        )}
-
-        <div className="timeline-playhead" style={{ left: `${pct(currentTime)}%` }} />
-
-        <div
-          className="timeline-handle timeline-handle-start"
-          style={{ left: `${pct(trimStart)}%` }}
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            draggingHandle.current = 'start';
-            (e.target as Element).setPointerCapture(e.pointerId);
-          }}
-        />
-        <div
-          className="timeline-handle timeline-handle-end"
-          style={{ left: `${pct(trimEnd)}%` }}
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            draggingHandle.current = 'end';
-            (e.target as Element).setPointerCapture(e.pointerId);
-          }}
-        />
+        <div className="tl-playhead" style={{ left: `${playheadPct}%` }} />
       </div>
-      <div className="timeline-hint">
-        Drag the white handles to trim the ends. Click and drag anywhere in the middle to mark a section to cut out.
+      <div className="tl-hint">
+        Press <strong>Split</strong> to cut the video at the playhead. Click a piece to select it, drag pieces to
+        reorder them, or hit × to delete one and close the gap.
       </div>
     </div>
   );
