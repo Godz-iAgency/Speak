@@ -9,6 +9,7 @@ export interface Clip {
 }
 
 interface TimelineProps {
+  disabled?: boolean;
   clips: Clip[];
   /** Playhead position in OUTPUT time (i.e. after cuts and reordering). */
   currentTime: number;
@@ -35,6 +36,7 @@ function formatLen(s: number) {
 const DRAG_THRESHOLD = 5;
 
 export function Timeline({
+  disabled = false,
   clips,
   currentTime,
   totalDuration,
@@ -82,8 +84,10 @@ export function Timeline({
   }, [trimming, onTrim]);
 
   const startTrim = (e: React.PointerEvent, clip: Clip, edge: 'start' | 'end') => {
+    if (disabled) return;
     e.stopPropagation();
     e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     const blockEl = e.currentTarget.parentElement as HTMLElement | null;
     if (!blockEl) return;
     const rect = blockEl.getBoundingClientRect();
@@ -123,11 +127,14 @@ export function Timeline({
       const track = trackRef.current;
       // A press that never moved is a click: select the clip and scrub to where
       // it was clicked.
-      if (p && !p.moved && track && totalDuration > 0) {
+      if (e.type !== 'pointercancel' && p && !p.moved && track && totalDuration > 0) {
         onSelect(p.id);
-        const r = track.getBoundingClientRect();
-        const ratio = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
-        onSeek(ratio * totalDuration);
+        const block = track.querySelector(`[data-clip-index="${p.index}"]`);
+        const r = block?.getBoundingClientRect();
+        if (r) {
+          const ratio = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+          onSeek(clips.slice(0, p.index).reduce((sum, c) => sum + clipLength(c), 0) + ratio * clipLength(clips[p.index]));
+        }
       }
       press.current = null;
       setDraggingId(null);
@@ -141,9 +148,12 @@ export function Timeline({
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [draggingId, onReorder, onSelect, onSeek, totalDuration]);
+  }, [draggingId, onReorder, onSelect, onSeek, totalDuration, clips]);
 
   const startPress = (e: React.PointerEvent, clip: Clip, index: number) => {
+    if (disabled || e.button !== 0) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     press.current = { id: clip.id, index, x: e.clientX, moved: false };
     setDraggingId(clip.id);
   };
@@ -151,7 +161,7 @@ export function Timeline({
   if (clips.length === 0) {
     return (
       <div className="tl">
-        <div className="tl-empty">Everything's been cut. Undo a delete or record again.</div>
+        <div className="tl-empty">Everything's been cut. Record again to start over.</div>
       </div>
     );
   }

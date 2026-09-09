@@ -17,7 +17,9 @@ function extFor(contentType: string): string {
  * function at all.
  */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
+  res.setHeader('Cache-Control', 'no-store');
   if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
     res.status(405).json({ error: 'Method not allowed' });
     return;
   }
@@ -25,8 +27,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let uid: string;
   try {
     uid = await requireUid(req.headers.authorization);
-  } catch (err) {
-    res.status(401).json({ error: err instanceof Error ? err.message : 'Unauthorized' });
+  } catch {
+    res.status(401).json({ error: 'Unauthorized' });
     return;
   }
 
@@ -45,18 +47,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const key = `recordings/${uid}/${randomUUID()}.${extFor(contentType)}`;
 
   const s3 = new S3Client({
+    // The browser supplies the body later; do not sign an empty-body checksum.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
     region: B2_REGION,
     endpoint: B2_ENDPOINT,
     credentials: { accessKeyId: B2_KEY_ID, secretAccessKey: B2_APPLICATION_KEY },
   });
 
-  const uploadUrl = await getSignedUrl(
-    s3,
-    new PutObjectCommand({ Bucket: B2_BUCKET, Key: key, ContentType: contentType }),
-    { expiresIn: 600 },
-  );
+  try {
+    const uploadUrl = await getSignedUrl(
+      s3,
+      new PutObjectCommand({ Bucket: B2_BUCKET, Key: key, ContentType: contentType }),
+      { expiresIn: 600 },
+    );
 
-  const publicUrl = `https://${B2_DOWNLOAD_HOST}/file/${B2_BUCKET}/${key}`;
+    const publicUrl = `https://${B2_DOWNLOAD_HOST}/file/${B2_BUCKET}/${key}`;
 
-  res.status(200).json({ uploadUrl, key, publicUrl });
+    res.status(200).json({ uploadUrl, key, publicUrl });
+  } catch {
+    res.status(500).json({ error: 'Could not prepare the upload. Please try again.' });
+  } finally { s3.destroy(); }
 }

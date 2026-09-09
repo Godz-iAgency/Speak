@@ -5,6 +5,7 @@ import { CameraIcon, CheckIcon, MicIcon, RecordIcon } from './icons';
 interface HomeScreenProps {
   onStart: (opts: RecorderOptions) => void;
   error: string | null;
+  busy?: boolean;
 }
 
 interface OptionProps {
@@ -26,7 +27,7 @@ function Option({ on, onToggle, icon, label }: OptionProps) {
   );
 }
 
-export function HomeScreen({ onStart, error }: HomeScreenProps) {
+export function HomeScreen({ onStart, error, busy }: HomeScreenProps) {
   const [includeWebcam, setIncludeWebcam] = useState(true);
   const [includeMic, setIncludeMic] = useState(true);
 
@@ -53,7 +54,7 @@ export function HomeScreen({ onStart, error }: HomeScreenProps) {
         />
       </div>
 
-      <button className="btn btn-primary btn-large" onClick={() => onStart({ includeWebcam, includeMic })}>
+      <button className="btn btn-primary btn-large" disabled={busy} onClick={() => onStart({ includeWebcam, includeMic })}>
         <RecordIcon size={15} />
         Choose what to share
       </button>

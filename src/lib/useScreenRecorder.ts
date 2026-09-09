@@ -79,11 +79,18 @@ export function useScreenRecorder(): RecorderResult {
   const startTimeRef = useRef<number>(0);
   const timerRef = useRef<number | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const mixedAudioRef = useRef<MediaStream | null>(null);
   const canvasStreamRef = useRef<MediaStream | null>(null);
   const optsRef = useRef<RecorderOptions>({ includeWebcam: false, includeMic: false });
   const countdownTimerRef = useRef<number | null>(null);
 
+  const sessionRef = useRef(0);
+  const busyRef = useRef(false);
+  const pausedElapsedRef = useRef(0);
+
   const cleanupTracks = useCallback(() => {
+    sessionRef.current++;
+    busyRef.current = false;
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
     camStreamRef.current?.getTracks().forEach((t) => t.stop());
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
@@ -101,9 +108,30 @@ export function useScreenRecorder(): RecorderResult {
     countdownTimerRef.current = null;
     canvasStreamRef.current?.getTracks().forEach((t) => t.stop());
     canvasStreamRef.current = null;
+    mixedAudioRef.current?.getTracks().forEach((t) => t.stop());
+    mixedAudioRef.current = null;
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
   }, []);
+
+  useEffect(() => () => {
+    const recorder = recorderRef.current;
+    if (recorder) {
+      recorder.onstop = null;
+      recorder.ondataavailable = null;
+      recorder.onerror = null;
+      if (recorder.state !== 'inactive') recorder.stop();
+    }
+    cleanupTracks();
+    chunksRef.current = [];
+  }, [cleanupTracks]);
+
+  useEffect(() => {
+    if (status === 'idle' || status === 'error') return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [status]);
 
   const drawFrameRef = useRef<(includeWebcam: boolean) => void>(() => {});
   const camPosRef = useRef(camPos);
@@ -122,12 +150,7 @@ export function useScreenRecorder(): RecorderResult {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    if (canvas.width !== screenVideo.videoWidth && screenVideo.videoWidth > 0) {
-      canvas.width = screenVideo.videoWidth;
-      canvas.height = screenVideo.videoHeight;
-    }
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (screenVideo.readyState < 2) return;
     ctx.drawImage(screenVideo, 0, 0, canvas.width, canvas.height);
 
     if (includeWebcam && camVideoElRef.current && camVideoElRef.current.videoWidth > 0) {
@@ -180,6 +203,14 @@ export function useScreenRecorder(): RecorderResult {
 
   const arm = useCallback(
     async (opts: RecorderOptions) => {
+      if (busyRef.current || screenStreamRef.current) return;
+      busyRef.current = true;
+      const session = ++sessionRef.current;
+      const checkSession = (stream?: MediaStream) => {
+        if (session === sessionRef.current) return;
+        stream?.getTracks().forEach((track) => track.stop());
+        throw new Error('Setup cancelled');
+      };
       setError(null);
       setRecordedBlob(null);
       setStatus('requesting');
@@ -192,17 +223,20 @@ export function useScreenRecorder(): RecorderResult {
           video: { frameRate: 30 },
           audio: true,
         });
+        checkSession(screenStream);
         screenStreamRef.current = screenStream;
 
         let camStream: MediaStream | null = null;
         if (opts.includeWebcam) {
           camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          checkSession(camStream);
           camStreamRef.current = camStream;
         }
 
         let micStream: MediaStream | null = null;
         if (opts.includeMic) {
           micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          checkSession(micStream);
           micStreamRef.current = micStream;
         }
 
@@ -210,6 +244,7 @@ export function useScreenRecorder(): RecorderResult {
         screenVideo.srcObject = screenStream;
         screenVideo.muted = true;
         await screenVideo.play();
+        checkSession();
         screenVideoElRef.current = screenVideo;
 
         if (camStream) {
@@ -217,12 +252,16 @@ export function useScreenRecorder(): RecorderResult {
           camVideo.srcObject = camStream;
           camVideo.muted = true;
           await camVideo.play();
+          checkSession();
           camVideoElRef.current = camVideo;
         }
 
         const canvas = document.createElement('canvas');
-        canvas.width = screenVideo.videoWidth || 1280;
-        canvas.height = screenVideo.videoHeight || 720;
+        const width = screenVideo.videoWidth || 1280;
+        const height = screenVideo.videoHeight || 720;
+        const scale = Math.min(1, 1920 / width, 1080 / height);
+        canvas.width = Math.max(2, Math.round(width * scale / 2) * 2);
+        canvas.height = Math.max(2, Math.round(height * scale / 2) * 2);
         canvasRef.current = canvas;
 
         canvasStreamRef.current = canvas.captureStream(30);
@@ -242,8 +281,11 @@ export function useScreenRecorder(): RecorderResult {
         };
 
         setElapsedMs(0);
+        if (screenStream.getVideoTracks()[0].readyState === 'ended') throw new Error('Screen sharing ended. Please choose a screen again.');
+        busyRef.current = false;
         setStatus('ready');
       } catch (err) {
+        if (session !== sessionRef.current) return;
         setError(err instanceof Error ? err.message : 'Failed to start recording');
         setStatus('error');
         cleanupTracks();
@@ -257,66 +299,95 @@ export function useScreenRecorder(): RecorderResult {
     const screenStream = screenStreamRef.current;
     if (!canvasStream || !screenStream) return;
 
-    const audioCtx = new AudioContext();
-    audioCtxRef.current = audioCtx;
-    const dest = audioCtx.createMediaStreamDestination();
-    let hasAudio = false;
-    if (screenStream.getAudioTracks().length > 0) {
-      audioCtx.createMediaStreamSource(new MediaStream(screenStream.getAudioTracks())).connect(dest);
-      hasAudio = true;
-    }
-    const micStream = micStreamRef.current;
-    if (micStream && micStream.getAudioTracks().length > 0) {
-      audioCtx.createMediaStreamSource(new MediaStream(micStream.getAudioTracks())).connect(dest);
-      hasAudio = true;
-    }
+    try {
+      const audioCtx = audioCtxRef.current;
+      if (!audioCtx) throw new Error("Audio could not start. Please try again.");
+      if (audioCtx.state === 'suspended') throw new Error('Audio is paused by the browser. Please start recording again.');
+      const dest = audioCtx.createMediaStreamDestination();
+      mixedAudioRef.current = dest.stream;
+      let hasAudio = false;
+      if (screenStream.getAudioTracks().length > 0) {
+        audioCtx.createMediaStreamSource(new MediaStream(screenStream.getAudioTracks())).connect(dest);
+        hasAudio = true;
+      }
+      const micStream = micStreamRef.current;
+      if (micStream && micStream.getAudioTracks().length > 0) {
+        audioCtx.createMediaStreamSource(new MediaStream(micStream.getAudioTracks())).connect(dest);
+        hasAudio = true;
+      }
 
-    const combined = new MediaStream([
-      ...canvasStream.getVideoTracks(),
-      ...(hasAudio ? dest.stream.getAudioTracks() : []),
-    ]);
+      const combined = new MediaStream([
+        ...canvasStream.getVideoTracks(),
+        ...(hasAudio ? dest.stream.getAudioTracks() : []),
+      ]);
 
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-      ? 'video/webm;codecs=vp9,opus'
-      : 'video/webm';
-    const recorder = new MediaRecorder(combined, { mimeType });
-    chunksRef.current = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
-    };
-    recorder.onstop = () => {
-      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-      setRecordedBlob(blob);
-      setStatus('stopped');
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? 'video/webm;codecs=vp9,opus'
+        : 'video/webm';
+      const recorder = new MediaRecorder(combined, { mimeType });
+      chunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
+        chunksRef.current = [];
+        setRecordedBlob(blob);
+        setStatus('stopped');
+        cleanupTracks();
+      };
+      recorder.onerror = () => {
+        setError('Recording failed. Please try a smaller screen or close other busy apps.');
+        if (recorder.state !== 'inactive') recorder.stop();
+        else { cleanupTracks(); setStatus('error'); }
+      };
+      recorderRef.current = recorder;
+
+      recorder.start(250);
+      startTimeRef.current = Date.now();
+      setElapsedMs(0);
+      timerRef.current = window.setInterval(() => {
+        setElapsedMs(Date.now() - startTimeRef.current);
+      }, 250);
+      setStatus('recording');
+    } catch (err) {
       cleanupTracks();
-    };
-    recorderRef.current = recorder;
-
-    recorder.start(250);
-    startTimeRef.current = Date.now();
-    setElapsedMs(0);
-    timerRef.current = window.setInterval(() => {
-      setElapsedMs(Date.now() - startTimeRef.current);
-    }, 250);
-    setStatus('recording');
+      setError(err instanceof Error ? err.message : 'Could not start recording');
+      setStatus('error');
+    }
   }, [cleanupTracks]);
 
   const beginRecording = useCallback(() => {
+    if (!canvasStreamRef.current || countdownTimerRef.current || recorderRef.current?.state === 'recording') return;
+    const session = sessionRef.current;
+    try {
+      const audio = new AudioContext();
+      audioCtxRef.current = audio;
+      void audio.resume().catch(() => {
+        if (session !== sessionRef.current) return;
+        cleanupTracks();
+        setError('Audio could not start. Please try again.');
+        setStatus('error');
+      });
+    } catch (err) {
+      cleanupTracks();
+      setError(err instanceof Error ? err.message : 'Audio is unavailable');
+      setStatus('error');
+      return;
+    }
     setStatus('countdown');
     setCountdown(3);
+    let remaining = 3;
     countdownTimerRef.current = window.setInterval(() => {
-      setCountdown((prev) => {
-        if (prev === null) return null;
-        if (prev <= 1) {
-          if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
-          countdownTimerRef.current = null;
-          startCapture();
-          return null;
-        }
-        return prev - 1;
-      });
+      remaining--;
+      if (remaining <= 0) {
+        window.clearInterval(countdownTimerRef.current!);
+        countdownTimerRef.current = null;
+        setCountdown(null);
+        startCapture();
+      } else setCountdown(remaining);
     }, 1000);
-  }, [startCapture]);
+  }, [startCapture, cleanupTracks]);
 
   const cancelSetup = useCallback(() => {
     cleanupTracks();
@@ -331,6 +402,8 @@ export function useScreenRecorder(): RecorderResult {
   const pause = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state === 'recording') {
       recorderRef.current.pause();
+      pausedElapsedRef.current = Date.now() - startTimeRef.current;
+      setElapsedMs(pausedElapsedRef.current);
       setStatus('paused');
       if (timerRef.current) window.clearInterval(timerRef.current);
     }
@@ -340,13 +413,13 @@ export function useScreenRecorder(): RecorderResult {
     if (recorderRef.current && recorderRef.current.state === 'paused') {
       recorderRef.current.resume();
       setStatus('recording');
-      const pausedElapsed = elapsedMs;
+      const pausedElapsed = pausedElapsedRef.current;
       startTimeRef.current = Date.now() - pausedElapsed;
       timerRef.current = window.setInterval(() => {
         setElapsedMs(Date.now() - startTimeRef.current);
       }, 250);
     }
-  }, [elapsedMs]);
+  }, []);
 
   const reset = useCallback(() => {
     setRecordedBlob(null);

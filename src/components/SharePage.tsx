@@ -11,7 +11,7 @@ type LoadState = { status: 'loading' } | { status: 'error'; message: string } | 
 function formatDuration(s: number) {
   if (!Number.isFinite(s)) return '';
   const m = Math.floor(s / 60);
-  const sec = Math.round(s % 60);
+  const sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 

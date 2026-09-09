@@ -41,3 +41,11 @@ Push to a repo Vercel is watching, or `vercel deploy` — Vercel auto-detects th
 ## Brand assets
 
 See [`brand/BRANDING.md`](brand/BRANDING.md) for the logo, icon, and color token picks.
+
+## Recording controls and verification
+
+The large preview is for camera setup. After Start, switch to the real tab or app you selected. Supported browsers open always-on-top controls; otherwise return to Speak or use the browser's Stop sharing button. Alt+Shift+P pauses/resumes and Alt+Shift+S stops while Speak or its floating controls have focus. Closing the floating window does not stop recording.
+
+Capture fits within 1920×1080 at 30 fps. Recordings and edits are kept in memory; download before leaving. The video processor is served with this app and downloaded when editing begins.
+
+Run `npm run build`, `npm run lint`, `npm test`, and `npm run test:browser` (Microsoft Edge required). See [EVALUATION.md](EVALUATION.md) for findings, evidence, known limits, and deployment checks. Firestore rules must be published separately. Configure B2 CORS to allow your app origin, PUT, and Content-Type; local Vite alone does not run the Vercel signing function.

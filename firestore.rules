@@ -3,15 +3,25 @@ service cloud.firestore {
   match /databases/{database}/documents {
     match /recordings/{recordingId} {
       // Anyone with the link can view — that's the point of a share link.
-      allow read: if true;
+      allow get: if true;
+      allow list: if false;
 
-      // Only a signed-in (anonymous) user can create a recording, and only as
+      // Only a signed-in user can create a recording, and only as
       // themself — the doc's ownerUid must match the caller's own uid.
       allow create: if request.auth != null
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.keys().hasAll(['ownerUid', 'durationSec', 'sizeBytes', 'b2Key', 'videoUrl', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['ownerUid', 'durationSec', 'sizeBytes', 'b2Key', 'videoUrl', 'createdAt'])
         && request.resource.data.durationSec is number
-        && request.resource.data.sizeBytes is number;
+        && request.resource.data.durationSec > 0
+        && request.resource.data.sizeBytes is int
+        && request.resource.data.sizeBytes > 0
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.b2Key is string
+        && request.resource.data.b2Key.matches('recordings/' + request.auth.uid + '/[^/]+[.](mp4|webm)')
+        && request.resource.data.videoUrl is string
+        && request.resource.data.videoUrl.size() < 2048
+        && request.resource.data.videoUrl.matches('https://.*');
 
       // No edit UI exists yet, so recordings are immutable once created.
       allow update: if false;

@@ -31,8 +31,9 @@ export function startFrameLoop(fps: number, onFrame: () => void): FrameLoop {
   const intervalMs = Math.max(1, Math.round(1000 / fps));
   let stopped = false;
 
+  let url: string | null = null;
   try {
-    const url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
+    url = URL.createObjectURL(new Blob([WORKER_SOURCE], { type: 'text/javascript' }));
     const worker = new Worker(url);
     worker.onmessage = () => {
       if (!stopped) onFrame();
@@ -42,10 +43,11 @@ export function startFrameLoop(fps: number, onFrame: () => void): FrameLoop {
       stop: () => {
         stopped = true;
         worker.terminate();
-        URL.revokeObjectURL(url);
+        if (url) URL.revokeObjectURL(url);
       },
     };
   } catch {
+    if (url) URL.revokeObjectURL(url);
     // No worker available. A main-thread timer is throttled in background tabs,
     // but it still beats rAF, which stops completely.
     const id = window.setInterval(() => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Timeline, type Clip } from './Timeline';
 import { trimAndExport, remuxForDuration, cancelExport, isCancellation } from '../lib/ffmpeg';
 import { uploadRecording } from '../lib/upload';
@@ -85,29 +85,42 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const [shareUrl, setShareUrl] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-
-  // React StrictMode intentionally mounts every component twice in dev to surface
-  // exactly this kind of bug — without this guard the remux would run twice
-  // concurrently on the shared ffmpeg singleton. It's not cancellable mid-flight,
-  // so the guard just makes sure it's only ever started once per recording.
-  const remuxStartedRef = useRef(false);
-
+  const alive = useRef(false);
+  const ownsExport = useRef(false);
+  const uploadAbort = useRef<AbortController | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (remuxStartedRef.current) return;
-    remuxStartedRef.current = true;
-    remuxForDuration(blob)
-      .then((fixed) => {
-        setWorkingBlob(fixed);
-        setVideoUrl(URL.createObjectURL(fixed));
-      })
-      .catch((err) => {
-        // Without ffmpeg there is no trimming and no export, so offer the raw
-        // recording rather than an editor whose buttons cannot work.
-        setPrepError(err instanceof Error ? err.message : String(err));
-        setVideoUrl(URL.createObjectURL(blob));
-      });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    alive.current = true;
+    return () => {
+      alive.current = false;
+      if (ownsExport.current) cancelExport();
+      uploadAbort.current?.abort();
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+    };
   }, []);
+
+  const remuxRef = useRef<{ blob: Blob; promise: Promise<Blob> } | null>(null);
+  const [exportDuration, setExportDuration] = useState(0);
+  useEffect(() => {
+    let active = true;
+    if (remuxRef.current?.blob !== blob) remuxRef.current = { blob, promise: remuxForDuration(blob) };
+    remuxRef.current.promise.then((fixed) => {
+      if (!active) return;
+      setWorkingBlob(fixed);
+      setVideoUrl(URL.createObjectURL(fixed));
+    }).catch((err) => {
+      if (!active) return;
+      setPrepError(err instanceof Error ? err.message : String(err));
+      setVideoUrl(URL.createObjectURL(blob));
+    });
+    return () => { active = false; };
+  }, [blob]);
+
+  const invalidateExport = () => {
+    setExportBlob(null);
+    setExportUrl(null);
+    setShareUrl(null);
+  };
 
   useEffect(() => {
     return () => {
@@ -134,7 +147,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   // Playback walks the clips in their current order, jumping the source video to
   // the next clip's start whenever it runs off the end of the current one. That
   // is what makes cuts close up and reordered pieces play back in their new order.
-  const advancePlayhead = (v: HTMLVideoElement) => {
+  const advancePlayhead = useCallback((v: HTMLVideoElement) => {
     const idx = playIndexRef.current;
     const clip = clips[idx];
     if (!clip) return;
@@ -159,7 +172,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     }
 
     setCurrentTime(sourceToOutput(clips, idx, v.currentTime));
-  };
+  }, [clips, totalDuration]);
 
   // rAF gives a smooth playhead and catches clip boundaries within a frame, but it
   // is suspended in background tabs — `timeupdate` is driven by the media clock and
@@ -175,7 +188,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  });
+  }, [isPlaying, advancePlayhead]);
 
   const handleTimeUpdate = () => {
     const v = videoRef.current;
@@ -198,7 +211,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
 
   const togglePlay = () => {
     const v = videoRef.current;
-    if (!v || clips.length === 0) return;
+    if (!v || clips.length === 0 || exporting || uploading) return;
     if (isPlaying) {
       v.pause();
       setIsPlaying(false);
@@ -210,8 +223,10 @@ export function Editor({ blob, onDiscard }: EditorProps) {
       v.currentTime = clips[0].start;
       setCurrentTime(0);
     }
-    v.play();
-    setIsPlaying(true);
+    void v.play().then(() => setIsPlaying(true)).catch(() => {
+      setIsPlaying(false);
+      setExportError('Playback could not start. Try pressing Play again.');
+    });
   };
 
   const splitAtPlayhead = () => {
@@ -222,12 +237,16 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     if (hit.sourceTime - clip.start < MIN_CLIP || clip.end - hit.sourceTime < MIN_CLIP) return;
     const left: Clip = { id: `c${clipSeq.current++}`, start: clip.start, end: hit.sourceTime };
     const right: Clip = { id: `c${clipSeq.current++}`, start: hit.sourceTime, end: clip.end };
-    setClips(clips.flatMap((c, i) => (i === hit.index ? [left, right] : [c])));
+    const next = clips.flatMap((c, i) => (i === hit.index ? [left, right] : [c]));
+    invalidateExport();
+    setClips(next);
+    seekWithin(next, currentTime);
     setSelectedClipId(right.id);
   };
 
   const deleteClip = (id: string) => {
     const next = clips.filter((c) => c.id !== id);
+    invalidateExport();
     setClips(next);
     if (selectedClipId === id) setSelectedClipId(null);
     const nextTotal = next.reduce((acc, c) => acc + clipLength(c), 0);
@@ -239,6 +258,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     const next = [...clips];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
+    invalidateExport();
     setClips(next);
     seekWithin(next, currentTime);
   };
@@ -252,6 +272,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
       }
       return { ...c, end: Math.min(sourceDuration, Math.max(sourceTime, c.start + MIN_CLIP)) };
     });
+    invalidateExport();
     setClips(next);
     seekWithin(next, currentTime);
   };
@@ -260,6 +281,8 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const seekWithin = (list: Clip[], t: number) => {
     const v = videoRef.current;
     if (!v || list.length === 0) {
+      v?.pause();
+      setIsPlaying(false);
       setCurrentTime(0);
       return;
     }
@@ -280,7 +303,9 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   );
 
   const handleExport = async () => {
-    if (!workingBlob) return;
+    if (!workingBlob || exporting || uploading) return;
+    videoRef.current?.pause();
+    setIsPlaying(false);
     setExporting(true);
     setCancelling(false);
     setExportProgress(0);
@@ -289,17 +314,23 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     setExportError(null);
     setShareUrl(null);
     setUploadError(null);
+    ownsExport.current = true;
     try {
       const outBlob = await trimAndExport(workingBlob, keepSegments, setExportProgress);
+      if (!alive.current) return;
+      setExportDuration(totalDuration);
       setExportBlob(outBlob);
       setExportUrl(URL.createObjectURL(outBlob));
     } catch (err) {
       // A cancel is something the user asked for, so it isn't reported as a failure.
-      if (!isCancellation(err)) setExportError(err instanceof Error ? err.message : String(err));
+      if (alive.current && !isCancellation(err)) setExportError(err instanceof Error ? err.message : String(err));
     } finally {
-      setExporting(false);
-      setCancelling(false);
-      setExportProgress(0);
+      ownsExport.current = false;
+      if (alive.current) {
+        setExporting(false);
+        setCancelling(false);
+        setExportProgress(0);
+      }
     }
   };
 
@@ -309,17 +340,20 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   };
 
   const handleGetLink = async () => {
-    if (!exportBlob) return;
+    if (!exportBlob || uploading || exporting) return;
     setUploading(true);
     setUploadProgress(0);
     setUploadError(null);
+    uploadAbort.current = new AbortController();
     try {
-      const id = await uploadRecording(exportBlob, totalDuration, setUploadProgress);
+      const id = await uploadRecording(exportBlob, exportDuration, setUploadProgress, uploadAbort.current.signal);
+      if (!alive.current) return;
       setShareUrl(`${window.location.origin}/v/${id}`);
     } catch (err) {
-      setUploadError(err instanceof Error ? err.message : String(err));
+      if (alive.current) setUploadError(err instanceof Error ? err.message : String(err));
     } finally {
-      setUploading(false);
+      uploadAbort.current = null;
+      if (alive.current) setUploading(false);
     }
   };
 
@@ -327,8 +361,10 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     if (!shareUrl) return;
     try {
       await navigator.clipboard.writeText(shareUrl);
+      if (!alive.current) return;
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+      copyTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch {
       /* clipboard permission denied — the link is still visible to copy by hand */
     }
@@ -380,59 +416,71 @@ export function Editor({ blob, onDiscard }: EditorProps) {
             src={videoUrl}
             onLoadedMetadata={handleLoadedMetadata}
             onTimeUpdate={handleTimeUpdate}
+            onEnded={() => {
+              const v = videoRef.current;
+              if (!v) return;
+              if (playIndexRef.current + 1 < clips.length) {
+                const index = ++playIndexRef.current;
+                v.currentTime = clips[index].start;
+                void v.play().catch(() => setIsPlaying(false));
+              } else { setIsPlaying(false); setCurrentTime(totalDuration); }
+            }}
             onClick={togglePlay}
             className="editor-video"
           />
         </div>
 
-        <div className="editor-controls">
-          <button
-            className="btn btn-icon btn-icon-accent"
-            onClick={togglePlay}
-            aria-label={isPlaying ? 'Pause' : 'Play'}
-          >
-            {isPlaying ? <PauseIcon size={17} /> : <PlayIcon size={17} />}
-          </button>
-          <span className="editor-time">
-            {formatTime(currentTime)} <span>/ {formatTime(totalDuration)}</span>
-          </span>
-          <button
-            className="btn btn-secondary btn-small"
-            onClick={splitAtPlayhead}
-            disabled={clips.length === 0}
-            title="Cut the video in two at the playhead"
-          >
-            <SplitIcon size={15} />
-            Split
-          </button>
-          <button
-            className="btn btn-secondary btn-small"
-            onClick={() => selectedClipId && deleteClip(selectedClipId)}
-            disabled={!selectedClipId}
-            title="Delete the selected piece"
-          >
-            <TrashIcon size={15} />
-            Delete
-          </button>
-          <span className="editor-final">
-            Final length <strong>{formatTime(totalDuration)}</strong>
-          </span>
-        </div>
+        <fieldset className="editor-edit-tools" disabled={exporting || uploading}>
+          <div className="editor-controls">
+            <button
+              className="btn btn-icon btn-icon-accent"
+              onClick={togglePlay}
+              aria-label={isPlaying ? 'Pause' : 'Play'}
+            >
+              {isPlaying ? <PauseIcon size={17} /> : <PlayIcon size={17} />}
+            </button>
+            <span className="editor-time">
+              {formatTime(currentTime)} <span>/ {formatTime(totalDuration)}</span>
+            </span>
+            <button
+              className="btn btn-secondary btn-small"
+              onClick={splitAtPlayhead}
+              disabled={clips.length === 0}
+              title="Cut the video in two at the playhead"
+            >
+              <SplitIcon size={15} />
+              Split
+            </button>
+            <button
+              className="btn btn-secondary btn-small"
+              onClick={() => selectedClipId && deleteClip(selectedClipId)}
+              disabled={!selectedClipId}
+              title="Delete the selected piece"
+            >
+              <TrashIcon size={15} />
+              Delete
+            </button>
+            <span className="editor-final">
+              Final length <strong>{formatTime(totalDuration)}</strong>
+            </span>
+          </div>
 
-        <Timeline
-          clips={clips}
-          currentTime={currentTime}
-          totalDuration={totalDuration}
-          selectedId={selectedClipId}
-          onSelect={setSelectedClipId}
-          onSeek={seek}
-          onDelete={deleteClip}
-          onReorder={reorderClips}
-          onTrim={trimClip}
-        />
+          <Timeline
+            clips={clips}
+            currentTime={currentTime}
+            totalDuration={totalDuration}
+            selectedId={selectedClipId}
+            onSelect={setSelectedClipId}
+            onSeek={seek}
+            onDelete={deleteClip}
+            onReorder={reorderClips}
+            onTrim={trimClip}
+            disabled={exporting || uploading}
+          />
 
+        </fieldset>
         <div className="editor-actions">
-          <button className="btn btn-ghost" onClick={onDiscard} disabled={exporting}>
+          <button className="btn btn-ghost" onClick={onDiscard} disabled={exporting || uploading}>
             <TrashIcon size={16} />
             Discard &amp; record again
           </button>
@@ -444,7 +492,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
           <button
             className="btn btn-primary"
             onClick={handleExport}
-            disabled={exporting || keepSegments.length === 0 || !workingBlob}
+            disabled={exporting || uploading || keepSegments.length === 0 || !workingBlob}
           >
             <SparkIcon size={16} />
             {exporting ? `Exporting… ${Math.round(exportProgress * 100)}%` : 'Export MP4'}

@@ -1,32 +1,57 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { toBlobURL } from '@ffmpeg/util';
+import coreScriptURL from '@ffmpeg/core?url';
+import coreWasmURL from '@ffmpeg/core/wasm?url';
 
 let ffmpegInstance: FFmpeg | null = null;
+let loadAbort: AbortController | null = null;
+let loadingInstance: FFmpeg | null = null;
+let loadGeneration = 0;
 let loadPromise: Promise<FFmpeg> | null = null;
 
 // FFmpeg keeps every registered listener forever, so the singleton gets exactly one
 // progress listener that forwards to whichever job is currently running.
 let progressCallback: ((ratio: number) => void) | null = null;
 
-const CORE_BASE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+
 
 export function getFFmpeg(): Promise<FFmpeg> {
   if (ffmpegInstance) return Promise.resolve(ffmpegInstance);
   if (loadPromise) return loadPromise;
 
   loadPromise = (async () => {
+    const generation = loadGeneration;
     const ffmpeg = new FFmpeg();
+    loadingInstance = ffmpeg;
+    const urls: string[] = [];
+    const abort = new AbortController();
+    loadAbort = abort;
+    const timeout = setTimeout(() => abort.abort(), 120000);
+    const coreURL = async (url: string, type: string) => {
+      const response = await fetch(url, { signal: abort.signal });
+      if (!response.ok) throw new Error('Could not download the video processor.');
+      const data = await response.arrayBuffer();
+      if (abort.signal.aborted) throw new Error(EXPORT_CANCELLED);
+      return URL.createObjectURL(new Blob([data], { type }));
+    };
     ffmpeg.on('progress', ({ progress }) => {
       progressCallback?.(Math.min(1, Math.max(0, progress)));
     });
     try {
-      await ffmpeg.load({
-        coreURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${CORE_BASE}/ffmpeg-core.wasm`, 'application/wasm'),
-      });
+      urls.push(await coreURL(coreScriptURL, 'text/javascript'));
+      urls.push(await coreURL(coreWasmURL, 'application/wasm'));
+      if (generation !== loadGeneration) throw new Error(EXPORT_CANCELLED);
+      await ffmpeg.load({ coreURL: urls[0], wasmURL: urls[1] });
+      if (generation !== loadGeneration) throw new Error(EXPORT_CANCELLED);
     } catch (err) {
-      loadPromise = null;
+      if (generation === loadGeneration) loadPromise = null;
+      ffmpeg.terminate();
+      if (generation !== loadGeneration) throw new Error(EXPORT_CANCELLED);
       throw err;
+    } finally {
+      clearTimeout(timeout);
+      if (loadAbort === abort) loadAbort = null;
+      urls.forEach((url) => URL.revokeObjectURL(url));
+      if (loadingInstance === ffmpeg) loadingInstance = null;
     }
     ffmpegInstance = ffmpeg;
     return ffmpeg;
@@ -55,7 +80,11 @@ let cancelRequested = false;
  */
 export function cancelExport() {
   cancelRequested = true;
-  const instance = ffmpegInstance;
+  loadGeneration++;
+  loadAbort?.abort();
+  loadAbort = null;
+  const instance = ffmpegInstance ?? loadingInstance;
+  loadingInstance = null;
   ffmpegInstance = null;
   loadPromise = null;
   progressCallback = null;
@@ -107,13 +136,18 @@ export function remuxForDuration(blob: Blob): Promise<Blob> {
     const outputName = `${id}-remux-out.webm`;
     try {
       await ffmpeg.writeFile(inputName, new Uint8Array(await blob.arrayBuffer()));
-      await ffmpeg.exec(['-y', '-i', inputName, '-c', 'copy', outputName]);
+      await execChecked(ffmpeg, ['-y', '-i', inputName, '-c', 'copy', outputName]);
       const data = await ffmpeg.readFile(outputName);
       return new Blob([new Uint8Array(data as Uint8Array)], { type: 'video/webm' });
     } finally {
       await removeFiles(ffmpeg, [inputName, outputName]);
     }
   });
+}
+
+async function execChecked(ffmpeg: FFmpeg, args: string[]) {
+  const code = await ffmpeg.exec(args);
+  if (code !== 0) throw new Error(`Video processing failed (exit ${code}).`);
 }
 
 async function removeFiles(ffmpeg: FFmpeg, names: string[]) {
@@ -142,8 +176,15 @@ async function trimAndExportInner(
   keepSegments: Segment[],
   onProgress?: (ratio: number) => void,
 ): Promise<Blob> {
+  if (!keepSegments.length || keepSegments.some((s) => !Number.isFinite(s.start) || !Number.isFinite(s.end) || s.start < 0 || s.end <= s.start)) throw new Error('Select at least one valid clip.');
   cancelRequested = false;
   const ffmpeg = await getFFmpeg();
+  if (cancelRequested) throw new Error(EXPORT_CANCELLED);
+  let reported = 0;
+  const report = (ratio: number) => {
+    reported = Math.max(reported, Math.min(1, Number.isFinite(ratio) ? ratio : 0));
+    onProgress?.(reported);
+  };
 
   const id = nextOpId();
   const inputName = `${id}-input.webm`;
@@ -172,10 +213,11 @@ async function trimAndExportInner(
       const seg = keepSegments[i];
       const segSeconds = Math.max(0, seg.end - seg.start);
       const partName = `${id}-part${i}.mp4`;
+      partNames.push(partName);
       progressCallback = (ratio) => {
-        onProgress?.(((doneSeconds + ratio * segSeconds) / totalSeconds) * ENCODE_SHARE);
+        report(((doneSeconds + ratio * segSeconds) / totalSeconds) * ENCODE_SHARE);
       };
-      await ffmpeg.exec([
+      await execChecked(ffmpeg, [
         '-y',
         '-ss', seg.start.toFixed(3),
         '-to', seg.end.toFixed(3),
@@ -183,13 +225,16 @@ async function trimAndExportInner(
         '-c:v', 'libx264',
         '-preset', 'veryfast',
         '-crf', '20',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+        '-pix_fmt', 'yuv420p',
+        '-r', '30',
+        '-movflags', '+faststart',
         '-c:a', 'aac',
         partName,
       ]);
       failIfCancelled();
       doneSeconds += segSeconds;
-      onProgress?.((doneSeconds / totalSeconds) * ENCODE_SHARE);
-      partNames.push(partName);
+      report((doneSeconds / totalSeconds) * ENCODE_SHARE);
     }
 
     progressCallback = null;
@@ -198,12 +243,12 @@ async function trimAndExportInner(
       outputName = partNames[0];
     } else {
       await ffmpeg.writeFile(listName, partNames.map((n) => `file '${n}'`).join('\n'));
-      await ffmpeg.exec(['-y', '-f', 'concat', '-safe', '0', '-i', listName, '-c', 'copy', outputName]);
+      await execChecked(ffmpeg, ['-y', '-f', 'concat', '-safe', '0', '-i', listName, '-c', 'copy', '-movflags', '+faststart', outputName]);
       failIfCancelled();
     }
 
     const data = await ffmpeg.readFile(outputName);
-    onProgress?.(1);
+    report(1);
     return new Blob([new Uint8Array(data as Uint8Array)], { type: 'video/mp4' });
   } catch (err) {
     // Terminating the worker rejects whatever was in flight with its own error.

@@ -6,7 +6,7 @@ const FEATURES = [
   {
     icon: CameraIcon,
     title: 'Screen and face, together',
-    body: "See yourself and your screen live while you record. Drag your camera bubble anywhere, resize it with a double-click, and it's baked right into the video.",
+    body: "Position your camera before you record, then work directly in the app you’re sharing. Drag your camera bubble anywhere, resize it with a double-click, and it's baked right into the video.",
   },
   {
     icon: SparkIcon,
@@ -21,7 +21,7 @@ const FEATURES = [
   {
     icon: MicIcon,
     title: 'Built for how you talk',
-    body: "A 3-2-1 countdown so you're never caught off guard, live preview the whole time, and a mic that just works. No plugins, no setup.",
+    body: "A 3-2-1 countdown so you're never caught off guard, compact recording controls, and a mic that just works. No plugins, no setup.",
   },
 ];
 

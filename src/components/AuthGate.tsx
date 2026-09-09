@@ -4,10 +4,12 @@ import { Login } from './Login';
 import type { User } from 'firebase/auth';
 
 function SignOutBar({ user }: { user: User }) {
+  const [error, setError] = useState('');
   return (
     <div className="signout-bar">
+      <span role="status">{error}</span>
       <span className="signout-email">{user.email ?? 'Signed in'}</span>
-      <button className="signout-btn" onClick={() => signOut()}>
+      <button className="signout-btn" onClick={() => void signOut().catch(() => setError('Could not sign out. Try again.'))}>
         Sign out
       </button>
     </div>

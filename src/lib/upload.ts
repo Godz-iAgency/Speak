@@ -7,9 +7,10 @@ interface SignResponse {
   publicUrl: string;
 }
 
-async function requestUploadUrl(idToken: string, contentType: string): Promise<SignResponse> {
+async function requestUploadUrl(idToken: string, contentType: string, signal?: AbortSignal): Promise<SignResponse> {
   const res = await fetch('/api/sign-upload', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${idToken}`,
@@ -24,9 +25,13 @@ async function requestUploadUrl(idToken: string, contentType: string): Promise<S
 }
 
 // fetch() can't report upload progress, so the PUT itself goes through XHR.
-function putWithProgress(url: string, blob: Blob, contentType: string, onProgress?: (ratio: number) => void) {
+function putWithProgress(url: string, blob: Blob, contentType: string, onProgress?: (ratio: number) => void, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error("Upload cancelled.")); return; }
     const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    xhr.onloadend = () => signal?.removeEventListener("abort", abort);
     xhr.open('PUT', url);
     xhr.setRequestHeader('Content-Type', contentType);
     xhr.upload.onprogress = (e) => {
@@ -37,6 +42,9 @@ function putWithProgress(url: string, blob: Blob, contentType: string, onProgres
       else reject(new Error(`Upload failed (${xhr.status})`));
     };
     xhr.onerror = () => reject(new Error('Upload failed: network error'));
+    xhr.timeout = 15 * 60 * 1000;
+    xhr.ontimeout = () => reject(new Error('Upload timed out. Check your connection and try again.'));
+    xhr.onabort = () => reject(new Error('Upload cancelled.'));
     xhr.send(blob);
   });
 }
@@ -49,13 +57,15 @@ export async function uploadRecording(
   blob: Blob,
   durationSec: number,
   onProgress?: (ratio: number) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   const user = requireCurrentUser();
   const idToken = await user.getIdToken();
   const contentType = blob.type || 'video/mp4';
 
-  const { uploadUrl, key, publicUrl } = await requestUploadUrl(idToken, contentType);
-  await putWithProgress(uploadUrl, blob, contentType, onProgress);
+  const { uploadUrl, key, publicUrl } = await requestUploadUrl(idToken, contentType, signal);
+  await putWithProgress(uploadUrl, blob, contentType, onProgress, signal);
+  if (signal?.aborted) throw new Error("Upload cancelled.");
 
   return createRecording({
     ownerUid: user.uid,
