@@ -40,6 +40,32 @@ export interface Segment {
   end: number;
 }
 
+export const EXPORT_CANCELLED = 'EXPORT_CANCELLED';
+
+export function isCancellation(err: unknown): boolean {
+  return err instanceof Error && err.message === EXPORT_CANCELLED;
+}
+
+let cancelRequested = false;
+
+/**
+ * Stops the running export. A wasm exec cannot be interrupted from the outside,
+ * so the only way out is to tear the whole worker down — which takes its virtual
+ * filesystem with it. The singleton is cleared so the next job loads a fresh one.
+ */
+export function cancelExport() {
+  cancelRequested = true;
+  const instance = ffmpegInstance;
+  ffmpegInstance = null;
+  loadPromise = null;
+  progressCallback = null;
+  try {
+    instance?.terminate();
+  } catch {
+    /* worker already gone */
+  }
+}
+
 // The ffmpeg instance above is a module-wide singleton, so every job shares one
 // virtual filesystem. Two jobs racing on the same filenames — e.g. React
 // StrictMode's double-mount, or a fast re-record — can have one job's cleanup
@@ -116,8 +142,8 @@ async function trimAndExportInner(
   keepSegments: Segment[],
   onProgress?: (ratio: number) => void,
 ): Promise<Blob> {
+  cancelRequested = false;
   const ffmpeg = await getFFmpeg();
-  progressCallback = onProgress ?? null;
 
   const id = nextOpId();
   const inputName = `${id}-input.webm`;
@@ -125,12 +151,30 @@ async function trimAndExportInner(
   const partNames: string[] = [];
   let outputName = `${id}-output.mp4`;
 
+  // ffmpeg reports progress per exec, so a multi-clip export would otherwise run
+  // the bar 0->100% once per clip. Each clip gets a slice of the bar weighted by
+  // its duration, since encode time tracks length. The concat pass is a stream
+  // copy and near-instant, so it only takes the last sliver — which also stops
+  // the bar parking on 100% while there's still work left.
+  const totalSeconds = keepSegments.reduce((acc, s) => acc + Math.max(0, s.end - s.start), 0) || 1;
+  const ENCODE_SHARE = 0.97;
+  let doneSeconds = 0;
+
+  const failIfCancelled = () => {
+    if (cancelRequested) throw new Error(EXPORT_CANCELLED);
+  };
+
   try {
     await ffmpeg.writeFile(inputName, new Uint8Array(await blob.arrayBuffer()));
+    failIfCancelled();
 
     for (let i = 0; i < keepSegments.length; i++) {
       const seg = keepSegments[i];
+      const segSeconds = Math.max(0, seg.end - seg.start);
       const partName = `${id}-part${i}.mp4`;
+      progressCallback = (ratio) => {
+        onProgress?.(((doneSeconds + ratio * segSeconds) / totalSeconds) * ENCODE_SHARE);
+      };
       await ffmpeg.exec([
         '-y',
         '-ss', seg.start.toFixed(3),
@@ -142,20 +186,36 @@ async function trimAndExportInner(
         '-c:a', 'aac',
         partName,
       ]);
+      failIfCancelled();
+      doneSeconds += segSeconds;
+      onProgress?.((doneSeconds / totalSeconds) * ENCODE_SHARE);
       partNames.push(partName);
     }
+
+    progressCallback = null;
 
     if (partNames.length === 1) {
       outputName = partNames[0];
     } else {
       await ffmpeg.writeFile(listName, partNames.map((n) => `file '${n}'`).join('\n'));
       await ffmpeg.exec(['-y', '-f', 'concat', '-safe', '0', '-i', listName, '-c', 'copy', outputName]);
+      failIfCancelled();
     }
 
     const data = await ffmpeg.readFile(outputName);
+    onProgress?.(1);
     return new Blob([new Uint8Array(data as Uint8Array)], { type: 'video/mp4' });
+  } catch (err) {
+    // Terminating the worker rejects whatever was in flight with its own error.
+    // Report that as the cancellation it actually was, not as a failure.
+    if (cancelRequested) throw new Error(EXPORT_CANCELLED);
+    throw err;
   } finally {
     progressCallback = null;
-    await removeFiles(ffmpeg, [...new Set([inputName, listName, outputName, ...partNames])]);
+    // A cancelled job's filesystem died with the worker, and calling into a
+    // terminated instance throws.
+    if (!cancelRequested) {
+      await removeFiles(ffmpeg, [...new Set([inputName, listName, outputName, ...partNames])]);
+    }
   }
 }

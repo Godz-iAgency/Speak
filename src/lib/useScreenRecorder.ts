@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react';
+import { startFrameLoop, type FrameLoop } from './frameLoop';
 
 export type RecorderStatus =
   | 'idle'
@@ -72,7 +73,7 @@ export function useScreenRecorder(): RecorderResult {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const rafRef = useRef<number | null>(null);
+  const frameLoopRef = useRef<FrameLoop | null>(null);
   const screenVideoElRef = useRef<HTMLVideoElement | null>(null);
   const camVideoElRef = useRef<HTMLVideoElement | null>(null);
   const startTimeRef = useRef<number>(0);
@@ -92,8 +93,8 @@ export function useScreenRecorder(): RecorderResult {
     screenVideoElRef.current = null;
     camVideoElRef.current = null;
     canvasRef.current = null;
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
+    frameLoopRef.current?.stop();
+    frameLoopRef.current = null;
     if (timerRef.current) window.clearInterval(timerRef.current);
     timerRef.current = null;
     if (countdownTimerRef.current) window.clearInterval(countdownTimerRef.current);
@@ -159,12 +160,17 @@ export function useScreenRecorder(): RecorderResult {
       ctx.strokeStyle = 'rgba(255,255,255,0.9)';
       ctx.stroke();
     }
-
-    rafRef.current = requestAnimationFrame(() => drawFrameRef.current(includeWebcam));
   }, []);
   useEffect(() => {
     drawFrameRef.current = drawFrame;
   }, [drawFrame]);
+
+  // 30fps to match both the display capture and canvas.captureStream below, so
+  // every composited frame the recorder asks for is a freshly painted one.
+  const startCompositing = useCallback((includeWebcam: boolean) => {
+    frameLoopRef.current?.stop();
+    frameLoopRef.current = startFrameLoop(30, () => drawFrameRef.current(includeWebcam));
+  }, []);
 
   const stopInternal = useCallback(() => {
     if (recorderRef.current && recorderRef.current.state !== 'inactive') {
@@ -224,6 +230,7 @@ export function useScreenRecorder(): RecorderResult {
         // Compositing runs during setup so the bubble can be positioned against a
         // live picture before anything is captured.
         drawFrame(opts.includeWebcam);
+        startCompositing(opts.includeWebcam);
 
         screenStream.getVideoTracks()[0].onended = () => {
           if (recorderRef.current && recorderRef.current.state !== 'inactive') {
@@ -242,7 +249,7 @@ export function useScreenRecorder(): RecorderResult {
         cleanupTracks();
       }
     },
-    [cleanupTracks, drawFrame, stopInternal],
+    [cleanupTracks, drawFrame, startCompositing, stopInternal],
   );
 
   const startCapture = useCallback(() => {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Timeline, type Clip } from './Timeline';
-import { trimAndExport, remuxForDuration } from '../lib/ffmpeg';
+import { trimAndExport, remuxForDuration, cancelExport, isCancellation } from '../lib/ffmpeg';
 import { uploadRecording } from '../lib/upload';
 import { firebaseConfigured } from '../lib/firebase';
 import {
@@ -74,6 +74,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const playIndexRef = useRef(0);
   const clipSeq = useRef(0);
   const [exporting, setExporting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportBlob, setExportBlob] = useState<Blob | null>(null);
   const [exportUrl, setExportUrl] = useState<string | null>(null);
@@ -281,6 +282,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const handleExport = async () => {
     if (!workingBlob) return;
     setExporting(true);
+    setCancelling(false);
     setExportProgress(0);
     setExportBlob(null);
     setExportUrl(null);
@@ -292,10 +294,18 @@ export function Editor({ blob, onDiscard }: EditorProps) {
       setExportBlob(outBlob);
       setExportUrl(URL.createObjectURL(outBlob));
     } catch (err) {
-      setExportError(err instanceof Error ? err.message : String(err));
+      // A cancel is something the user asked for, so it isn't reported as a failure.
+      if (!isCancellation(err)) setExportError(err instanceof Error ? err.message : String(err));
     } finally {
       setExporting(false);
+      setCancelling(false);
+      setExportProgress(0);
     }
+  };
+
+  const handleCancelExport = () => {
+    setCancelling(true);
+    cancelExport();
   };
 
   const handleGetLink = async () => {
@@ -426,6 +436,11 @@ export function Editor({ blob, onDiscard }: EditorProps) {
             <TrashIcon size={16} />
             Discard &amp; record again
           </button>
+          {exporting && (
+            <button className="btn btn-ghost" onClick={handleCancelExport} disabled={cancelling}>
+              {cancelling ? 'Cancelling…' : 'Cancel export'}
+            </button>
+          )}
           <button
             className="btn btn-primary"
             onClick={handleExport}
