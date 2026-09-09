@@ -1,0 +1,11 @@
+/* Speak brand colors, extracted from the ChatGPT moodboard (Sep 9, 2026). */
+:root {
+  --speak-midnight: #0B1020;  /* background */
+  --speak-violet:   #7C3AED; /* primary */
+  --speak-pink:     #EC4899; /* accent */
+  --speak-cyan:     #06B6D4; /* accent */
+  --speak-orange:   #F97316; /* highlight */
+  --speak-cloud:    #F8FAFC; /* surface */
+
+  --speak-gradient-primary: linear-gradient(135deg, var(--speak-violet), var(--speak-pink));
+}
