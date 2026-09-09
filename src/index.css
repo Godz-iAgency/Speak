@@ -651,6 +651,8 @@ h3 {
   height: auto;
   max-width: 100%;
   max-height: calc(100vh - 28px);
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .live-preview-cam-handle {
@@ -659,6 +661,8 @@ h3 {
   border: 2px dashed rgba(255, 255, 255, 0.55);
   cursor: grab;
   touch-action: none;
+  -webkit-user-drag: none;
+  user-select: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -1115,6 +1119,44 @@ h3 {
 
 .tl-clip-del:hover {
   background: var(--danger);
+}
+
+.tl-trim-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ew-resize;
+  touch-action: none;
+  -webkit-user-drag: none;
+  user-select: none;
+  background: rgba(240, 171, 252, 0.28);
+  z-index: 2;
+}
+
+.tl-trim-handle-left {
+  left: 0;
+  border-radius: 9px 0 0 9px;
+}
+
+.tl-trim-handle-right {
+  right: 0;
+  border-radius: 0 9px 9px 0;
+}
+
+.tl-trim-handle:hover,
+.tl-trim-handle:active {
+  background: rgba(217, 70, 239, 0.55);
+}
+
+.tl-trim-bracket {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #fff;
+  pointer-events: none;
 }
 
 .tl-playhead {

@@ -18,6 +18,8 @@ interface TimelineProps {
   onSeek: (outputTime: number) => void;
   onDelete: (id: string) => void;
   onReorder: (from: number, to: number) => void;
+  /** Drag an edge handle in/out. `sourceTime` is the raw, unclamped drag result. */
+  onTrim: (id: string, edge: 'start' | 'end', sourceTime: number) => void;
 }
 
 function clipLength(c: Clip) {
@@ -41,11 +43,54 @@ export function Timeline({
   onSeek,
   onDelete,
   onReorder,
+  onTrim,
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [trimming, setTrimming] = useState(false);
 
   const press = useRef<{ id: string; index: number; x: number; moved: boolean } | null>(null);
+  const trim = useRef<{ id: string; edge: 'start' | 'end'; pxPerSec: number; startX: number; initial: number } | null>(
+    null,
+  );
+
+  // Edge handles crop a clip in/out. Tracked on the window for the same reason
+  // reordering is: a fast drag can outrun the handle sliding along with it.
+  useEffect(() => {
+    if (!trimming) return;
+
+    const onMove = (e: PointerEvent) => {
+      const t = trim.current;
+      if (!t) return;
+      const deltaSeconds = (e.clientX - t.startX) / t.pxPerSec;
+      onTrim(t.id, t.edge, t.initial + deltaSeconds);
+    };
+
+    const onUp = () => {
+      trim.current = null;
+      setTrimming(false);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, [trimming, onTrim]);
+
+  const startTrim = (e: React.PointerEvent, clip: Clip, edge: 'start' | 'end') => {
+    e.stopPropagation();
+    e.preventDefault();
+    const blockEl = e.currentTarget.parentElement as HTMLElement | null;
+    if (!blockEl) return;
+    const rect = blockEl.getBoundingClientRect();
+    const pxPerSec = rect.width / Math.max(clipLength(clip), 0.001);
+    trim.current = { id: clip.id, edge, pxPerSec, startX: e.clientX, initial: edge === 'start' ? clip.start : clip.end };
+    setTrimming(true);
+  };
 
   // Reordering tracks on the window so a fast drag can't outrun the clip element
   // sliding out from under the pointer.
@@ -144,6 +189,24 @@ export function Timeline({
             >
               ×
             </button>
+            {selectedId === clip.id && (
+              <>
+                <div
+                  className="tl-trim-handle tl-trim-handle-left"
+                  onPointerDown={(e) => startTrim(e, clip, 'start')}
+                  title="Drag to crop in from the start"
+                >
+                  <span className="tl-trim-bracket">[</span>
+                </div>
+                <div
+                  className="tl-trim-handle tl-trim-handle-right"
+                  onPointerDown={(e) => startTrim(e, clip, 'end')}
+                  title="Drag to crop in from the end"
+                >
+                  <span className="tl-trim-bracket">]</span>
+                </div>
+              </>
+            )}
           </div>
         ))}
         <div className="tl-playhead" style={{ left: `${playheadPct}%` }} />

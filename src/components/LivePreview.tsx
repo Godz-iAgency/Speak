@@ -139,6 +139,11 @@ export function LivePreview({
   const handlePointerDown = (e: React.PointerEvent) => {
     const container = containerRef.current;
     if (!container || !handleStyle) return;
+    // Without this, a fast press can cross Chrome's native drag threshold and the
+    // browser hijacks the gesture as an OS-level element drag (dead giveaway: the
+    // cursor turns into the "no drop target" slash) instead of a plain pointer drag.
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
     const box = container.getBoundingClientRect();
     const centreX = box.left + handleStyle.left + handleStyle.width / 2;
     const centreY = box.top + handleStyle.top + handleStyle.height / 2;
@@ -165,6 +170,8 @@ export function LivePreview({
           style={handleStyle}
           onPointerDown={handlePointerDown}
           onDoubleClick={handleDoubleClick}
+          onDragStart={(e) => e.preventDefault()}
+          draggable={false}
           title="Drag to move, double-click to resize"
         />
       )}

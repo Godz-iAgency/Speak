@@ -65,6 +65,8 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const [currentTime, setCurrentTime] = useState(0);
   /** Real aspect ratio of the recording, used to size the stage to fill the screen. */
   const [aspect, setAspect] = useState(16 / 9);
+  /** Full length of the underlying recording, in seconds — the outer bound clips can trim within. */
+  const [sourceDuration, setSourceDuration] = useState(0);
   const [clips, setClips] = useState<Clip[]>([]);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -122,6 +124,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     const v = videoRef.current;
     if (!v || !Number.isFinite(v.duration)) return;
     if (v.videoWidth > 0 && v.videoHeight > 0) setAspect(v.videoWidth / v.videoHeight);
+    setSourceDuration(v.duration);
     setClips([{ id: `c${clipSeq.current++}`, start: 0, end: v.duration }]);
   };
 
@@ -235,6 +238,19 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     const next = [...clips];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
+    setClips(next);
+    seekWithin(next, currentTime);
+  };
+
+  /** Drag an edge handle in/out. Clamps to the source recording's bounds and a minimum clip length. */
+  const trimClip = (id: string, edge: 'start' | 'end', sourceTime: number) => {
+    const next = clips.map((c) => {
+      if (c.id !== id) return c;
+      if (edge === 'start') {
+        return { ...c, start: Math.max(0, Math.min(sourceTime, c.end - MIN_CLIP)) };
+      }
+      return { ...c, end: Math.min(sourceDuration, Math.max(sourceTime, c.start + MIN_CLIP)) };
+    });
     setClips(next);
     seekWithin(next, currentTime);
   };
@@ -379,6 +395,15 @@ export function Editor({ blob, onDiscard }: EditorProps) {
             <SplitIcon size={15} />
             Split
           </button>
+          <button
+            className="btn btn-secondary btn-small"
+            onClick={() => selectedClipId && deleteClip(selectedClipId)}
+            disabled={!selectedClipId}
+            title="Delete the selected piece"
+          >
+            <TrashIcon size={15} />
+            Delete
+          </button>
           <span className="editor-final">
             Final length <strong>{formatTime(totalDuration)}</strong>
           </span>
@@ -393,6 +418,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
           onSeek={seek}
           onDelete={deleteClip}
           onReorder={reorderClips}
+          onTrim={trimClip}
         />
 
         <div className="editor-actions">
