@@ -18,6 +18,7 @@ export interface RecorderOptions {
 }
 
 export type CamSizeKey = 'sm' | 'md' | 'lg';
+export type CaptureSurface = NonNullable<MediaTrackSettings['displaySurface']> | '';
 
 export interface CamPosition {
   xRatio: number;
@@ -40,11 +41,16 @@ interface RecorderResult {
   reset: () => void;
   recordedBlob: Blob | null;
   canvasRef: RefObject<HTMLCanvasElement | null>;
+  webcamStream: MediaStream | null;
   webcamEnabled: boolean;
+  captureLabel: string;
+  captureSurface: CaptureSurface;
   camPos: CamPosition;
   camSize: CamSizeKey;
   setCamPos: (pos: CamPosition) => void;
   setCamSize: (size: CamSizeKey) => void;
+  setExternalOverlayActive: (active: boolean) => void;
+  captureCameraFrame: () => string | null;
 }
 
 // Bubble diameter as a fraction of the shorter canvas dimension, so it scales
@@ -63,7 +69,10 @@ export function useScreenRecorder(): RecorderResult {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [recordedBlob, setRecordedBlob] = useState<Blob | null>(null);
   const [webcamEnabled, setWebcamEnabled] = useState(false);
+  const [webcamStream, setWebcamStream] = useState<MediaStream | null>(null);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [captureLabel, setCaptureLabel] = useState('');
+  const [captureSurface, setCaptureSurface] = useState<CaptureSurface>('');
   const [camPos, setCamPos] = useState<CamPosition>(DEFAULT_CAM_POS);
   const [camSize, setCamSize] = useState<CamSizeKey>('md');
 
@@ -83,6 +92,8 @@ export function useScreenRecorder(): RecorderResult {
   const canvasStreamRef = useRef<MediaStream | null>(null);
   const optsRef = useRef<RecorderOptions>({ includeWebcam: false, includeMic: false });
   const countdownTimerRef = useRef<number | null>(null);
+  const externalOverlayRef = useRef(false);
+  const cameraFrameCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const sessionRef = useRef(0);
   const busyRef = useRef(false);
@@ -96,6 +107,7 @@ export function useScreenRecorder(): RecorderResult {
     micStreamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current = null;
     camStreamRef.current = null;
+    setWebcamStream(null);
     micStreamRef.current = null;
     screenVideoElRef.current = null;
     camVideoElRef.current = null;
@@ -153,7 +165,7 @@ export function useScreenRecorder(): RecorderResult {
     if (screenVideo.readyState < 2) return;
     ctx.drawImage(screenVideo, 0, 0, canvas.width, canvas.height);
 
-    if (includeWebcam && camVideoElRef.current && camVideoElRef.current.videoWidth > 0) {
+    if (includeWebcam && !externalOverlayRef.current && camVideoElRef.current && camVideoElRef.current.videoWidth > 0) {
       const cam = camVideoElRef.current;
       const minDim = Math.min(canvas.width, canvas.height);
       const size = CAM_SIZE_FRACTIONS[camSizeRef.current] * minDim;
@@ -183,6 +195,26 @@ export function useScreenRecorder(): RecorderResult {
       ctx.strokeStyle = 'rgba(255,255,255,0.9)';
       ctx.stroke();
     }
+  }, []);
+
+  const setExternalOverlayActive = useCallback((active: boolean) => {
+    externalOverlayRef.current = active;
+  }, []);
+
+  const captureCameraFrame = useCallback(() => {
+    const camera = camVideoElRef.current;
+    if (!camera || camera.readyState < 2 || camera.videoWidth < 1 || camera.videoHeight < 1) return null;
+    const canvas = cameraFrameCanvasRef.current ?? document.createElement('canvas');
+    cameraFrameCanvasRef.current = canvas;
+    canvas.width = 180;
+    canvas.height = 180;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    const side = Math.min(camera.videoWidth, camera.videoHeight);
+    const sourceX = (camera.videoWidth - side) / 2;
+    const sourceY = (camera.videoHeight - side) / 2;
+    context.drawImage(camera, sourceX, sourceY, side, side, 0, 0, 180, 180);
+    return canvas.toDataURL('image/webp', 0.68);
   }, []);
   useEffect(() => {
     drawFrameRef.current = drawFrame;
@@ -225,12 +257,16 @@ export function useScreenRecorder(): RecorderResult {
         });
         checkSession(screenStream);
         screenStreamRef.current = screenStream;
+        const screenTrack = screenStream.getVideoTracks()[0];
+        setCaptureLabel(screenTrack.label || '');
+        setCaptureSurface(screenTrack.getSettings?.().displaySurface || '');
 
         let camStream: MediaStream | null = null;
         if (opts.includeWebcam) {
           camStream = await navigator.mediaDevices.getUserMedia({ video: true });
           checkSession(camStream);
           camStreamRef.current = camStream;
+          setWebcamStream(camStream);
         }
 
         let micStream: MediaStream | null = null;
@@ -428,6 +464,9 @@ export function useScreenRecorder(): RecorderResult {
     setError(null);
     setWebcamEnabled(false);
     setCountdown(null);
+    setCaptureLabel('');
+    setCaptureSurface('');
+    externalOverlayRef.current = false;
   }, []);
 
   return {
@@ -444,10 +483,15 @@ export function useScreenRecorder(): RecorderResult {
     reset,
     recordedBlob,
     canvasRef,
+    webcamStream,
     webcamEnabled,
+    captureLabel,
+    captureSurface,
     camPos,
     camSize,
     setCamPos,
     setCamSize,
+    setExternalOverlayActive,
+    captureCameraFrame,
   };
 }

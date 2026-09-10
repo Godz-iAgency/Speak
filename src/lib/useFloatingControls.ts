@@ -4,7 +4,7 @@ interface PictureInPicture {
   requestWindow(options: { width: number; height: number }): Promise<Window>;
 }
 
-export function useFloatingControls(active: boolean) {
+export function useFloatingControls(active: boolean, withCamera = false) {
   const [pip, setPip] = useState<Window | null>(null);
   const current = useRef<Window | null>(null);
   const generation = useRef(0);
@@ -13,7 +13,7 @@ export function useFloatingControls(active: boolean) {
     if (!api || current.current) return;
     const request = ++generation.current;
     try {
-      const child = await api.requestWindow({ width: 400, height: 110 });
+      const child = await api.requestWindow(withCamera ? { width: 280, height: 390 } : { width: 400, height: 110 });
       if (request !== generation.current) { child.close(); return; }
       document.querySelectorAll('style, link[rel="stylesheet"]').forEach((node) => {
         child.document.head.appendChild(node.cloneNode(true));
@@ -26,7 +26,7 @@ export function useFloatingControls(active: boolean) {
         if (current.current === child) { current.current = null; setPip(null); }
       }, { once: true });
     } catch { /* Unsupported or denied: controls remain in the Speak tab. */ }
-  }, [api]);
+  }, [api, withCamera]);
   useEffect(() => {
     if (!active) {
       generation.current++;

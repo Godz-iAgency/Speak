@@ -25,6 +25,11 @@ test('library dashboard, recording dialog and responsive viewer are usable',asyn
  await page.screenshot({path:'test-results/recording-dialog.png'});await page.keyboard.press('Escape');await expect(page.getByRole('dialog')).toHaveCount(0);
  await page.setViewportSize({width:390,height:844});await page.screenshot({path:'test-results/library-mobile.png',fullPage:true});
  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ await page.evaluate(()=>Object.defineProperty(navigator.mediaDevices,'getDisplayMedia',{value:undefined,configurable:true}));
+ await page.getByRole('button',{name:'New recording',exact:true}).click();
+ await expect(page.getByRole('heading',{name:'Open Speak on a computer to record'})).toBeVisible();
+ await expect(page.getByText(/recordings and shared videos still work on this phone or tablet/i)).toBeVisible();
+ await page.getByRole('button',{name:'Back to my library'}).click();
  await page.setViewportSize({width:1440,height:950});await page.goto('/');await mount(page,'/src/components/SharePage.tsx','SharePage');
  await expect(page.getByRole('heading',{name:'Product walkthrough'})).toBeVisible();await page.screenshot({path:'test-results/viewer-desktop.png',fullPage:true});
  await page.setViewportSize({width:390,height:844});await page.screenshot({path:'test-results/viewer-mobile.png',fullPage:true});

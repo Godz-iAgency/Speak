@@ -10,6 +10,7 @@ interface HomeScreenProps {
   error: string | null;
   busy?: boolean;
   onResume: (draft: Draft) => void;
+  extensionAvailable?: boolean;
 }
 
 interface OptionProps {
@@ -31,11 +32,12 @@ function Option({ on, onToggle, icon, label }: OptionProps) {
   );
 }
 
-export function HomeScreen({ onStart, error, busy, onResume }: HomeScreenProps) {
+export function HomeScreen({ onStart, error, busy, onResume, extensionAvailable = false }: HomeScreenProps) {
   const [setupOpen, setSetupOpen] = useState(Boolean(error || busy));
   const [includeWebcam, setIncludeWebcam] = useState(true);
   const [includeMic, setIncludeMic] = useState(true);
   const dialogRef = useDialogFocus(setupOpen, () => setSetupOpen(false), busy);
+  const screenCaptureSupported = typeof MediaRecorder !== 'undefined' && Boolean(navigator.mediaDevices?.getDisplayMedia);
 
   return (
     <div className="workspace">
@@ -51,9 +53,10 @@ export function HomeScreen({ onStart, error, busy, onResume }: HomeScreenProps) 
       <div className="home-icon-wrap">
         <img src="/speak-icon.png" alt="" className="home-icon" />
       </div>
-      <h2 id="recorder-title">Let’s make a video</h2>
-      <p className="home-subtitle">A quick hello is worth a thousand messages.</p>
+      <h2 id="recorder-title">{screenCaptureSupported ? 'Let’s make a video' : 'Open Speak on a computer to record'}</h2>
+      <p className="home-subtitle">{screenCaptureSupported ? 'A quick hello is worth a thousand messages.' : 'Your recordings and shared videos still work on this phone or tablet.'}</p>
 
+      {screenCaptureSupported ? <>
       <div className="home-options">
         <Option
           on={includeWebcam}
@@ -76,10 +79,22 @@ export function HomeScreen({ onStart, error, busy, onResume }: HomeScreenProps) 
 
       {error && <p className="home-error">{error}</p>}
 
+      <p className={`extension-availability ${extensionAvailable ? 'extension-availability-on' : ''}`}>
+        {extensionAvailable
+          ? 'Speak Companion is connected. Your camera bubble will follow you onto browser pages.'
+          : 'For a Loom-style bubble while using browser pages, add the Speak Companion extension in Chrome or Edge.'}
+      </p>
+
       <p className="home-hint">
         Pick a screen, window, or tab. You'll get a preview to position your camera first. Recording only starts when
         you press the button, after a 3&#8209;2&#8209;1 countdown.
       </p>
+      </> : <>
+        <div className="mobile-recording-note">
+          Mobile browsers do not provide the screen-capture access Speak needs. Use desktop Chrome or Edge to record, then view, organize, and share here on any device.
+        </div>
+        <button className="btn btn-secondary btn-large" onClick={() => setSetupOpen(false)}>Back to my library</button>
+      </>}
       </div></div>}
     </div>
   );

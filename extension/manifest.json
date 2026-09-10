@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Speak Companion",
+  "version": "1.0.0",
+  "description": "Show Speak's camera bubble and recording controls on the browser page you are presenting.",
+  "icons": {
+    "16": "speak-icon-32.png",
+    "32": "speak-icon-32.png",
+    "48": "speak-icon-192.png",
+    "128": "speak-icon-192.png"
+  },
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "action": {
+    "default_title": "Speak Companion",
+    "default_icon": "speak-icon-32.png",
+    "default_popup": "popup.html"
+  }
+}

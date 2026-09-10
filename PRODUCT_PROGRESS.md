@@ -11,12 +11,14 @@ This pass implements the recommended core flow: record → edit → library → 
 - One-click sharing uploads an unedited WebM directly; edited recordings are rendered to MP4 automatically. Local MP4 export is still available.
 - Public playback includes title, description, thumbnail, speed controls, timestamp links, copy fallback, and loading/error states.
 - Owner-scoped Firestore list queries are limited to 24; rename can change only the title. Public single-video links remain public. An owner/date composite index and Firebase deployment configuration are included.
+- Speak Companion is a Manifest V3 Chrome/Edge extension that injects the live camera bubble and controls into browser tabs, relays camera frames and commands, and keeps bubble position/size synchronized with the saved recording. Whole-screen and app-window capture use a camera-enabled Document Picture-in-Picture fallback.
+- Phones and tablets retain the responsive library and public viewer. Browsers without screen capture now receive a clear desktop-recording message instead of entering a broken recorder flow.
 
 ## Verification
 
-Production build and lint pass; all 28 unit/integration tests and all three browser scenarios pass. Automated tests cover recording lifecycle, export and cancellation, upload ordering, metadata bounds and owner query constraints, local account separation, draft recovery, edited/unedited sharing, library actions, and timestamp playback behavior.
+Production build and lint pass; all 33 unit/integration tests and all four browser scenarios pass. Automated tests cover recording lifecycle, extension packaging and message relay, injected overlay lifecycle, floating camera cleanup, export and cancellation, upload ordering, metadata bounds and owner query constraints, local account separation, draft recovery, edited/unedited sharing, library actions, mobile capture fallback, and timestamp playback behavior.
 
-Edge browser checks exercise real generated MediaRecorder media, Picture-in-Picture controls, remux/MP4 export, split/cancel/re-export, real IndexedDB reload and restored edits, and responsive library/viewer layouts. Desktop and mobile screenshots were inspected. Cloud data in these tests is mocked; no production authentication bypass was added.
+Edge browser checks exercise the real extension content script on a presented page, real generated MediaRecorder media, Picture-in-Picture camera controls, remux/MP4 export, split/cancel/re-export, real IndexedDB reload and restored edits, the unsupported-mobile recording message, and responsive library/viewer layouts. Desktop and mobile screenshots were inspected. The extension background relay is verified with a browser-API contract test; installing the unpacked extension with a physical camera remains a manual check. Cloud data in these tests is mocked; no production authentication bypass was added.
 
 ## Live deployment verification — 2026-09-10
 
@@ -30,6 +32,6 @@ GitHub reports a successful Vercel preview build for commit a7a3cff. The preview
 
 ## Remaining product gaps
 
-This is a core recording/sharing workspace, not full Loom feature parity. Team workspaces, folders, comments/reactions, view analytics, notifications, private/invite-only sharing, captions/transcription and AI summaries, camera-only recording, device selection, and server-side media processing remain future work. Shared-video deletion needs coordinated B2 and Firestore cleanup before it can be offered safely.
+This is a core recording/sharing workspace, not full Loom feature parity. The companion must be signed and published through the Chrome and Edge stores before it can have a one-click consumer install. A native iPhone/iPad recorder still requires an Apple project, ReplayKit capture extension, App Store signing, and Mac/Xcode verification; Android work was intentionally excluded from this pass. Team workspaces, folders, comments/reactions, view analytics, notifications, private/invite-only sharing, captions/transcription and AI summaries, camera-only recording, device selection, and server-side media processing remain future work. Shared-video deletion needs coordinated B2 and Firestore cleanup before it can be offered safely.
 
 Drafts are browser-local, not synced or encrypted. Clearing browser storage deletes them; quota errors are shown with a download fallback. An active recording still lives in memory until it stops, so this does not add crash recovery for in-progress sessions. Long recording memory pressure, upload quotas, orphan cleanup, and dependency advisories from EVALUATION.md remain relevant. The Firebase lazy-bundle size notice is also retained.

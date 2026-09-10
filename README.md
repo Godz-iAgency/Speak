@@ -44,7 +44,11 @@ See [`brand/BRANDING.md`](brand/BRANDING.md) for the logo, icon, and color token
 
 ## Recording controls and verification
 
-The large preview is for camera setup. After Start, switch to the real tab or app you selected. Supported browsers open always-on-top controls; otherwise return to Speak or use the browser's Stop sharing button. Alt+Shift+P pauses/resumes and Alt+Shift+S stops while Speak or its floating controls have focus. Closing the floating window does not stop recording.
+The large preview is for camera setup. After Start, switch to the real tab or app you selected. Supported browsers open an always-on-top camera and control window; otherwise return to Speak or use the browser's Stop sharing button. Alt+Shift+P pauses/resumes and Alt+Shift+S stops while Speak or its floating controls have focus. Closing the floating window does not stop recording.
+
+For the Loom-style experience on browser tabs, install **Speak Companion** from the [`extension`](extension) folder. In `chrome://extensions` or `edge://extensions`, enable Developer mode, choose **Load unpacked**, and select that folder. Refresh Speak and any browser page that was already open during installation. When you share a browser tab, the live camera bubble appears on the actual page you are using; it can be dragged and resized there, and its pause/resume/stop controls talk back to the recorder. See the [extension guide](extension/README.md) for details.
+
+Phones and tablets can sign in, browse the library, and watch shared videos. Mobile browsers do not expose the screen-capture access needed for a Loom-style recorder, so the recording dialog now explains that limitation instead of starting a broken flow. Recording requires desktop Chrome or Edge. A full iPhone/iPad recorder requires a separate signed native app and cannot be shipped or verified from this Windows web project.
 
 Capture fits within 1920×1080 at 30 fps. Completed recordings and edits autosave as private drafts in this browser. Wait for the saved status before closing; clearing browser data removes local drafts. Active recording is still memory-based and cannot recover from a crash. The video processor is served with this app and downloaded when editing begins.
 
