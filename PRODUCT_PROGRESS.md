@@ -18,11 +18,15 @@ Production build and lint pass; all 28 unit/integration tests and all three brow
 
 Edge browser checks exercise real generated MediaRecorder media, Picture-in-Picture controls, remux/MP4 export, split/cancel/re-export, real IndexedDB reload and restored edits, and responsive library/viewer layouts. Desktop and mobile screenshots were inspected. Cloud data in these tests is mocked; no production authentication bypass was added.
 
-## Deployment dependency
+## Live deployment verification — 2026-09-10
 
-The Firebase service account available here returned IAM_PERMISSION_DENIED when asked to validate the proposed rules. Rules and indexes have **not** been deployed or emulator-tested. Deploy them with a project administrator's Firebase CLI session as described in README, and wait for the index to finish building before frontend release. Old strict rules reject the new metadata and library requests.
+Firebase CLI authenticated with the project administrator and successfully deployed the rules and index to `speak-app-46019`. The project initially had no default Firestore database; the deployment enabled its API and created the database. Rules compiled successfully, and the owner/date index finished building.
 
-Live Firebase sign-in, a real B2 PUT, and public video playback against deployed storage remain unverified. GitHub push alone does not publish Firestore rules or prove a Vercel deployment is healthy. B2 CORS still needs the app origin, PUT, and Content-Type.
+Live Firebase checks passed: a temporary account signed in with a custom token, created recording metadata, renamed it, and found it through the owner-scoped indexed query. Unrestricted collection listing and ownership changes were rejected. Signed-out single-document access passed. Temporary test metadata and accounts were removed. This verifies the deployed rules, not the Google sign-in UI or a full production-browser recording session.
+
+The real upload-signing handler accepted a valid Firebase token and generated a URL. B2 rejected the subsequent video PUT with `InvalidAccessKeyId: Malformed Access Key Id`. The configured credentials successfully authenticate to B2's Native API and have key-creation capability; they are a master-key configuration that is incompatible with the S3 upload path. A bucket/prefix-restricted application key is required. Creating that persistent key and replacing local configuration is awaiting explicit user approval; no replacement key has been created yet.
+
+GitHub reports a successful Vercel preview build for commit a7a3cff. The preview requires Vercel login; the repository's listed homepage (`https://speak-hazel.vercel.app`) returns 404. Production environment settings, B2 CORS, and actual browser upload/playback still need verification. The feature branch remains separate from main until these release checks pass.
 
 ## Remaining product gaps
 

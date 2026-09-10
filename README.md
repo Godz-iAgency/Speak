@@ -72,4 +72,7 @@ firebase deploy --only firestore:rules,firestore:indexes --project YOUR_FIREBASE
 
 Use the same project as the app's Firebase configuration, and wait for the recordings ownerUid/createdAt index to become ready. The configuration is in `firebase.json`, `firestore.rules`, and `firestore.indexes.json`. No Firebase Hosting changes are included.
 
-See [PRODUCT_PROGRESS.md](PRODUCT_PROGRESS.md) for this pass's verification and remaining feature gaps. The configured service account could not validate/deploy Firebase rules in this environment: Firebase returned IAM_PERMISSION_DENIED. Live Firebase sign-in, B2 upload, and public playback still require a deployment smoke test.
+See [PRODUCT_PROGRESS.md](PRODUCT_PROGRESS.md) for this pass's verification and remaining feature gaps. On 2026-09-10, the project administrator deployed the rules/index to speak-app-46019 and live Firebase permission checks passed. B2 upload is still blocked by an incompatible master-key configuration; use a standard S3-compatible application key. Production-browser upload and playback remain unverified.
+### Backblaze key compatibility
+
+Speak uses the S3-Compatible API, which does not accept a B2 master application key. Use a standard application key restricted to the recordings bucket, and put its **keyID** in `B2_KEY_ID` and **applicationKey** in `B2_APPLICATION_KEY`. Keep both values server-only in local configuration and Vercel's environment settings. Changing `.env.local` does not update Vercel. See [Backblaze's S3 key requirements](https://www.backblaze.com/docs/cloud-storage-s3-compatible-app-keys).
