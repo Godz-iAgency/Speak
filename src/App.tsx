@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useFloatingControls } from './lib/useFloatingControls';
 import { HomeScreen } from './components/HomeScreen';
@@ -6,9 +6,11 @@ import { RecordingBar } from './components/RecordingBar';
 import { LivePreview } from './components/LivePreview';
 const Editor = lazy(() => import('./components/Editor').then(m => ({ default: m.Editor })));
 import { RecordIcon } from './components/icons';
+import type { Draft } from './lib/drafts';
 import { useScreenRecorder } from './lib/useScreenRecorder';
 
 function App() {
+  const [resumedDraft, setResumedDraft] = useState<Draft | null>(null);
   const {
     status,
     error,
@@ -56,10 +58,10 @@ function App() {
     </div><div className="recording-dock">{controls}</div>{pip && createPortal(controls, pip.document.body)}</div>;
   }
 
-  if (status === 'stopped' && recordedBlob) {
+  if (resumedDraft || (status === 'stopped' && recordedBlob)) {
     return (
       <div className="app app-editing">
-        <Suspense fallback={<p>Opening editor…</p>}><Editor blob={recordedBlob} onDiscard={reset} /></Suspense>
+        <Suspense fallback={<p>Opening editor…</p>}><Editor key={resumedDraft?.id || "new"} blob={resumedDraft?.blob || recordedBlob!} initialDraft={resumedDraft || undefined} onDiscard={() => {setResumedDraft(null);reset();}} /></Suspense>
       </div>
     );
   }
@@ -97,8 +99,8 @@ function App() {
   }
 
   return (
-    <div className="app">
-      <HomeScreen onStart={arm} error={error} busy={status === 'requesting'} />
+    <div className="app app-workspace">
+      <HomeScreen onStart={arm} error={error} busy={status === 'requesting'} onResume={setResumedDraft} />
     </div>
   );
 }

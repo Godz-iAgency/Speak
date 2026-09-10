@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Timeline, type Clip } from './Timeline';
 import { trimAndExport, remuxForDuration, cancelExport, isCancellation } from '../lib/ffmpeg';
 import { uploadRecording } from '../lib/upload';
-import { firebaseConfigured } from '../lib/firebase';
+import { saveDraft, type Draft } from '../lib/drafts';
+import { defaultTitle } from '../lib/videoDetails';
+import { auth, firebaseConfigured } from '../lib/firebase';
 import {
   CheckIcon,
-  CopyIcon,
   DownloadIcon,
   LinkIcon,
   PauseIcon,
@@ -18,6 +19,7 @@ import {
 interface EditorProps {
   blob: Blob;
   onDiscard: () => void;
+  initialDraft?: Draft;
 }
 
 /** Shortest piece worth keeping when splitting, in seconds. */
@@ -57,7 +59,15 @@ function sourceToOutput(clips: Clip[], index: number, sourceTime: number) {
   return acc + Math.max(0, Math.min(sourceTime - clip.start, clipLength(clip)));
 }
 
-export function Editor({ blob, onDiscard }: EditorProps) {
+export function Editor({ blob, onDiscard, initialDraft }: EditorProps) {
+  const [title, setTitle] = useState(initialDraft?.title || defaultTitle);
+  const [description, setDescription] = useState(initialDraft?.description || '');
+  const [draftId] = useState(() => initialDraft?.id || crypto.randomUUID());
+  const [createdAt] = useState(() => initialDraft?.createdAt || Date.now());
+  const [savedSignature, setSavedSignature] = useState('');
+  const [draftError, setDraftError] = useState('');
+  const [leaving, setLeaving] = useState(false);
+  const ownerUid = auth?.currentUser?.uid;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [workingBlob, setWorkingBlob] = useState<Blob | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -67,7 +77,8 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   const [aspect, setAspect] = useState(16 / 9);
   /** Full length of the underlying recording, in seconds — the outer bound clips can trim within. */
   const [sourceDuration, setSourceDuration] = useState(0);
-  const [clips, setClips] = useState<Clip[]>([]);
+  const [clips, setClips] = useState<Clip[]>(initialDraft?.clips || []);
+  const [editsReady, setEditsReady] = useState(Boolean(initialDraft && initialDraft.editsReady !== false));
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   /** Which clip playback is currently inside; playback walks clips in order. */
@@ -98,6 +109,33 @@ export function Editor({ blob, onDiscard }: EditorProps) {
       if (copyTimer.current) clearTimeout(copyTimer.current);
     };
   }, []);
+
+  const draftSignature = JSON.stringify([title, description, clips, editsReady]);
+  const persist = useCallback(async () => {
+    if (!ownerUid) return;
+    await saveDraft({ id: draftId, ownerUid, blob, title: title.trim() || 'Untitled video', description, clips, editsReady, createdAt, updatedAt: Date.now() });
+  }, [ownerUid, draftId, blob, title, description, clips, editsReady, createdAt]);
+  useEffect(() => {
+    if (ownerUid && !draftError && savedSignature === draftSignature && !uploading && !exporting) return;
+    const warn = (event: BeforeUnloadEvent) => {event.preventDefault();event.returnValue = '';};
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [ownerUid, draftError, savedSignature, draftSignature, uploading, exporting]);
+  useEffect(() => {
+    if (!ownerUid) return;
+    let current = true;
+    const timer = setTimeout(() => {
+      persist().then(() => { if (current) {setSavedSignature(draftSignature);setDraftError('');} })
+        .catch(() => { if (current) setDraftError('This draft could not be saved on this device. Download your recording before leaving.'); });
+    }, 500);
+    return () => { current = false; clearTimeout(timer); };
+  }, [persist, draftSignature, ownerUid]);
+  const returnToLibrary = async () => {
+    if (exporting || uploading || leaving) return;
+    setLeaving(true);
+    try { await persist(); onDiscard(); }
+    catch { setDraftError('Your draft could not be saved. Download the video before leaving.'); setLeaving(false); }
+  };
 
   const remuxRef = useRef<{ blob: Blob; promise: Promise<Blob> } | null>(null);
   const [exportDuration, setExportDuration] = useState(0);
@@ -139,7 +177,11 @@ export function Editor({ blob, onDiscard }: EditorProps) {
     if (!v || !Number.isFinite(v.duration)) return;
     if (v.videoWidth > 0 && v.videoHeight > 0) setAspect(v.videoWidth / v.videoHeight);
     setSourceDuration(v.duration);
-    setClips([{ id: `c${clipSeq.current++}`, start: 0, end: v.duration }]);
+    const restored = initialDraft?.clips;
+    if (initialDraft?.editsReady !== false && restored && restored.every(c => Number.isFinite(c.start) && Number.isFinite(c.end) && c.start >= 0 && c.end > c.start && c.end <= v.duration + 0.05)) {
+      setClips(restored.map(c => ({...c, id: 'c' + clipSeq.current++, end: Math.min(c.end, v.duration)})));
+    } else setClips([{ id: 'c' + clipSeq.current++, start: 0, end: v.duration }]);
+    setEditsReady(true);
   };
 
   const totalDuration = useMemo(() => clips.reduce((acc, c) => acc + clipLength(c), 0), [clips]);
@@ -340,20 +382,38 @@ export function Editor({ blob, onDiscard }: EditorProps) {
   };
 
   const handleGetLink = async () => {
-    if (!exportBlob || uploading || exporting) return;
-    setUploading(true);
-    setUploadProgress(0);
-    setUploadError(null);
+    if (!workingBlob || !keepSegments.length || uploading || exporting || shareUrl) return;
+    videoRef.current?.pause(); setIsPlaying(false);
+    setUploading(true); setUploadProgress(0); setUploadError(null);
     uploadAbort.current = new AbortController();
     try {
-      const id = await uploadRecording(exportBlob, exportDuration, setUploadProgress, uploadAbort.current.signal);
+      let shareBlob = exportBlob;
+      const untouched = keepSegments.length === 1 && keepSegments[0].start === 0 && Math.abs(keepSegments[0].end - sourceDuration) < 0.05;
+      if (!shareBlob && untouched) shareBlob = workingBlob;
+      if (!shareBlob) {
+        ownsExport.current = true; setExporting(true); setExportProgress(0);
+        shareBlob = await trimAndExport(workingBlob, keepSegments, setExportProgress);
+        if (!alive.current) return;
+        setExportBlob(shareBlob); setExportUrl(URL.createObjectURL(shareBlob));
+        setExportDuration(totalDuration); setExporting(false);
+      }
+      let thumbnail = '';
+      const video = videoRef.current;
+      if (video && video.readyState >= 2 && video.videoWidth) {
+        try {
+          const canvas = document.createElement('canvas'); canvas.width = 480; canvas.height = Math.round(480 / aspect);
+          canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+          thumbnail = canvas.toDataURL('image/jpeg', 0.55);
+        } catch { /* A thumbnail is optional; sharing still works without it. */ }
+      }
+      const id = await uploadRecording(shareBlob, exportBlob ? exportDuration : totalDuration, setUploadProgress, uploadAbort.current.signal, {title, description, thumbnail});
       if (!alive.current) return;
-      setShareUrl(`${window.location.origin}/v/${id}`);
+      setShareUrl(window.location.origin + '/v/' + id);
     } catch (err) {
-      if (alive.current) setUploadError(err instanceof Error ? err.message : String(err));
+      if (alive.current && !isCancellation(err)) setUploadError(err instanceof Error ? err.message : String(err));
     } finally {
-      uploadAbort.current = null;
-      if (alive.current) setUploading(false);
+      ownsExport.current = false; uploadAbort.current = null;
+      if (alive.current) {setUploading(false);setExporting(false);setCancelling(false);}
     }
   };
 
@@ -377,13 +437,14 @@ export function Editor({ blob, onDiscard }: EditorProps) {
           <video src={videoUrl} controls className="editor-video" />
         </div>
         <p className="home-error">Couldn't load the video processor ({prepError}).</p>
+        {draftError && <p className="home-error" role="alert">{draftError}</p>}
         <p className="editor-preparing">
           Trimming and MP4 export need it, but your recording is safe. Download it as-is and try again later.
         </p>
         <div className="editor-actions">
-          <button className="btn btn-ghost" onClick={onDiscard}>
+          <button className="btn btn-ghost" onClick={() => void returnToLibrary()}>
             <TrashIcon size={16} />
-            Record again
+            Back to library
           </button>
           <a className="btn btn-primary" href={videoUrl} download="recording.webm">
             <DownloadIcon size={16} />
@@ -409,6 +470,8 @@ export function Editor({ blob, onDiscard }: EditorProps) {
 
   return (
     <div className="editor">
+      <header className="editor-header"><button className="text-button" disabled={exporting || uploading || leaving} onClick={() => void returnToLibrary()}>← My library</button><span className="draft-status">{ownerUid ? draftError ? 'Draft not saved' : savedSignature === draftSignature ? 'Draft saved on this device' : 'Saving draft…' : 'Unsaved recording'}</span><button className="btn btn-primary" disabled={!workingBlob || !keepSegments.length || exporting || uploading || leaving || !firebaseConfigured} onClick={shareUrl ? handleCopyLink : handleGetLink}><LinkIcon size={16}/>{exporting && uploading ? 'Preparing… ' + Math.round(exportProgress * 100) + '%' : uploading ? 'Sharing… ' + Math.round(uploadProgress * 100) + '%' : shareUrl ? copied ? 'Copied' : 'Copy link' : 'Share video'}</button></header>
+      <div className="editor-details"><label className="sr-only" htmlFor="video-title">Video title</label><input id="video-title" className="video-title-input" maxLength={160} value={title} disabled={exporting || uploading || leaving || Boolean(shareUrl)} onChange={e=>setTitle(e.target.value)} placeholder="Give your video a title"/><label className="sr-only" htmlFor="video-description">Description</label><textarea id="video-description" rows={2} maxLength={2000} value={description} disabled={exporting || uploading || leaving || Boolean(shareUrl)} onChange={e=>setDescription(e.target.value)} placeholder="Add a little context for your viewers…"/></div>
       <div className="editor-main" style={{ '--ar': aspect } as React.CSSProperties}>
         <div className="editor-stage">
           <video
@@ -430,7 +493,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
           />
         </div>
 
-        <fieldset className="editor-edit-tools" disabled={exporting || uploading}>
+        <fieldset className="editor-edit-tools" disabled={exporting || uploading || leaving}>
           <div className="editor-controls">
             <button
               className="btn btn-icon btn-icon-accent"
@@ -475,14 +538,14 @@ export function Editor({ blob, onDiscard }: EditorProps) {
             onDelete={deleteClip}
             onReorder={reorderClips}
             onTrim={trimClip}
-            disabled={exporting || uploading}
+            disabled={exporting || uploading || leaving}
           />
 
         </fieldset>
         <div className="editor-actions">
-          <button className="btn btn-ghost" onClick={onDiscard} disabled={exporting || uploading}>
+          <button className="btn btn-ghost" onClick={() => void returnToLibrary()} disabled={exporting || uploading || leaving}>
             <TrashIcon size={16} />
-            Discard &amp; record again
+            Save &amp; back to library
           </button>
           {exporting && (
             <button className="btn btn-ghost" onClick={handleCancelExport} disabled={cancelling}>
@@ -492,7 +555,7 @@ export function Editor({ blob, onDiscard }: EditorProps) {
           <button
             className="btn btn-primary"
             onClick={handleExport}
-            disabled={exporting || uploading || keepSegments.length === 0 || !workingBlob}
+            disabled={exporting || uploading || leaving || keepSegments.length === 0 || !workingBlob}
           >
             <SparkIcon size={16} />
             {exporting ? `Exporting… ${Math.round(exportProgress * 100)}%` : 'Export MP4'}
@@ -500,6 +563,9 @@ export function Editor({ blob, onDiscard }: EditorProps) {
         </div>
       </div>
 
+      {draftError && <p className="home-error" role="alert">{draftError}</p>}
+      {uploadError && <p className="home-error" role="alert">Couldn’t share: {uploadError}</p>}
+      {shareUrl && <section className="share-success" aria-label="Video shared"><div><CheckIcon size={22}/><h2>Your video is ready to share</h2></div><p>Anyone with this link can watch. It’s also in your library.</p><div className="share-link-row"><input aria-label="Share link" className="share-link-input" value={shareUrl} readOnly onFocus={e=>e.target.select()}/><button className="btn btn-primary" onClick={handleCopyLink}>{copied ? 'Copied' : 'Copy link'}</button><a className="btn btn-secondary" href={shareUrl}>Open video</a></div></section>}
       {exportError && <p className="home-error">Export failed: {exportError}</p>}
 
       {exportUrl && (
@@ -528,17 +594,6 @@ export function Editor({ blob, onDiscard }: EditorProps) {
             )}
           </div>
 
-          {uploadError && <p className="home-error">Couldn't get a link: {uploadError}</p>}
-
-          {shareUrl && (
-            <div className="share-link-row">
-              <input className="share-link-input" value={shareUrl} readOnly onFocus={(e) => e.target.select()} />
-              <button className="btn btn-secondary" onClick={handleCopyLink}>
-                {copied ? <CheckIcon size={16} /> : <CopyIcon size={16} />}
-                {copied ? 'Copied' : 'Copy'}
-              </button>
-            </div>
-          )}
         </div>
       )}
     </div>

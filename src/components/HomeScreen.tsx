@@ -1,4 +1,7 @@
 import { useState } from 'react';
+import { useDialogFocus } from '../lib/useDialogFocus';
+import { Library } from './Library';
+import type { Draft } from '../lib/drafts';
 import type { RecorderOptions } from '../lib/useScreenRecorder';
 import { CameraIcon, CheckIcon, MicIcon, RecordIcon } from './icons';
 
@@ -6,6 +9,7 @@ interface HomeScreenProps {
   onStart: (opts: RecorderOptions) => void;
   error: string | null;
   busy?: boolean;
+  onResume: (draft: Draft) => void;
 }
 
 interface OptionProps {
@@ -27,17 +31,28 @@ function Option({ on, onToggle, icon, label }: OptionProps) {
   );
 }
 
-export function HomeScreen({ onStart, error, busy }: HomeScreenProps) {
+export function HomeScreen({ onStart, error, busy, onResume }: HomeScreenProps) {
+  const [setupOpen, setSetupOpen] = useState(Boolean(error || busy));
   const [includeWebcam, setIncludeWebcam] = useState(true);
   const [includeMic, setIncludeMic] = useState(true);
+  const dialogRef = useDialogFocus(setupOpen, () => setSetupOpen(false), busy);
 
   return (
-    <div className="home">
+    <div className="workspace">
+      <aside className="workspace-sidebar">
+        <a className="workspace-brand" href="/"><img src="/speak-icon.png" alt=""/>speak.</a>
+        <span className="workspace-label">PERSONAL WORKSPACE</span>
+        <span className="workspace-nav-active"><span aria-hidden="true">▦</span> My library</span>
+        <div className="sidebar-note"><strong>A little video.<br/>A lot less back-and-forth.</strong><p>Record. Share. Be Heard.</p></div>
+      </aside>
+      <main className="workspace-main"><Library onRecord={() => setSetupOpen(true)} onResume={onResume}/></main>
+      {setupOpen && <div className="dialog-backdrop"><div ref={dialogRef} className="home recorder-dialog" role="dialog" aria-modal="true" aria-labelledby="recorder-title">
+      <button className="dialog-close" aria-label="Close recording setup" disabled={busy} onClick={() => setSetupOpen(false)}>×</button>
       <div className="home-icon-wrap">
         <img src="/speak-icon.png" alt="" className="home-icon" />
       </div>
-      <h1>speak.</h1>
-      <p className="home-subtitle">Record. Share. Be Heard.</p>
+      <h2 id="recorder-title">Let’s make a video</h2>
+      <p className="home-subtitle">A quick hello is worth a thousand messages.</p>
 
       <div className="home-options">
         <Option
@@ -65,6 +80,7 @@ export function HomeScreen({ onStart, error, busy }: HomeScreenProps) {
         Pick a screen, window, or tab. You'll get a preview to position your camera first. Recording only starts when
         you press the button, after a 3&#8209;2&#8209;1 countdown.
       </p>
+      </div></div>}
     </div>
   );
 }

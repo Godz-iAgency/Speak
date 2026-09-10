@@ -1,5 +1,5 @@
 import { requireCurrentUser } from './firebase';
-import { createRecording } from './recordings';
+import { createRecording, type RecordingDetails } from './recordings';
 
 interface SignResponse {
   uploadUrl: string;
@@ -58,6 +58,7 @@ export async function uploadRecording(
   durationSec: number,
   onProgress?: (ratio: number) => void,
   signal?: AbortSignal,
+  details: RecordingDetails = {},
 ): Promise<string> {
   const user = requireCurrentUser();
   const idToken = await user.getIdToken();
@@ -68,6 +69,7 @@ export async function uploadRecording(
   if (signal?.aborted) throw new Error("Upload cancelled.");
 
   return createRecording({
+    ...details,
     ownerUid: user.uid,
     durationSec,
     sizeBytes: blob.size,

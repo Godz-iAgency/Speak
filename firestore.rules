@@ -4,14 +4,16 @@ service cloud.firestore {
     match /recordings/{recordingId} {
       // Anyone with the link can view — that's the point of a share link.
       allow get: if true;
-      allow list: if false;
+      allow list: if request.auth != null && resource.data.ownerUid == request.auth.uid
+        && request.query.limit != null && request.query.limit <= 24;
 
       // Only a signed-in user can create a recording, and only as
       // themself — the doc's ownerUid must match the caller's own uid.
       allow create: if request.auth != null
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.keys().hasAll(['ownerUid', 'durationSec', 'sizeBytes', 'b2Key', 'videoUrl', 'createdAt'])
-        && request.resource.data.keys().hasOnly(['ownerUid', 'durationSec', 'sizeBytes', 'b2Key', 'videoUrl', 'createdAt'])
+        && request.resource.data.keys().hasOnly(['ownerUid', 'durationSec', 'sizeBytes', 'b2Key', 'videoUrl', 'createdAt', 'title', 'description', 'thumbnail'])
+        && validDetails(request.resource.data)
         && request.resource.data.durationSec is number
         && request.resource.data.durationSec > 0
         && request.resource.data.sizeBytes is int
@@ -23,8 +25,16 @@ service cloud.firestore {
         && request.resource.data.videoUrl.size() < 2048
         && request.resource.data.videoUrl.matches('https://.*');
 
-      // No edit UI exists yet, so recordings are immutable once created.
-      allow update: if false;
+      function validDetails(data) {
+        return data.get('title', '') is string && data.get('title', '').size() <= 160
+          && data.get('description', '') is string && data.get('description', '').size() <= 2000
+          && data.get('thumbnail', '') is string && data.get('thumbnail', '').size() <= 60000
+          && (data.get('thumbnail', '') == '' || data.get('thumbnail', '').matches('data:image/jpeg;base64,.*'));
+      }
+      // Owners can rename, but ownership, storage location and measurements are immutable.
+      allow update: if request.auth != null && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title'])
+        && request.resource.data.title.size() > 0 && validDetails(request.resource.data);
       allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
     }
   }

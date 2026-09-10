@@ -1,5 +1,7 @@
 # Speak evaluation and fix pass
 
+Historical baseline for commit c69528a. The subsequent library, sharing, and draft changes supersede the no-autosave and deny-all-list notes below; see [PRODUCT_PROGRESS.md](PRODUCT_PROGRESS.md) for current behavior and verification.
+
 Reviewed 2026-09-09. Priorities: recording usability, lifecycle correctness, export reliability, then performance. The existing React state-machine shell, three-route entry point, worker compositor, and serial ffmpeg queue are appropriate for this product. No router, styling framework, or state library was added.
 
 ## Review coverage

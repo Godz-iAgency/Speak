@@ -15,6 +15,7 @@ test('real MediaRecorder captures changing detached canvas; controls, edit and M
     Object.defineProperty(navigator.mediaDevices,'getDisplayMedia',{value:async()=>source.captureStream(30),configurable:true});
     createRoot(document.getElementById('test-root')!).render(React.createElement(React.StrictMode,null,React.createElement(App)));
   });
+  await page.getByRole('button',{name:'New recording',exact:true}).click();
   await page.getByRole('button',{name:'Camera bubble'}).click();
   await page.getByRole('button',{name:'Microphone',exact:true}).click();
   await page.getByRole('button',{name:'Choose what to share'}).click();
